@@ -1,0 +1,10 @@
+services:
+  sma:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - SMA_DB_PATH=/app/data/sma.db
+    restart: unless-stopped

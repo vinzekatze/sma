@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SMA Forecast</title>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+<!-- Icon sprite — every functional icon in the app (was ad hoc emoji before,
+     rendered inconsistently across OS/browser font stacks; see sma/ui/icons.js
+     for the JS-side helper that references these ids). Add a new icon here,
+     nowhere else. -->
+<svg id="icon-sprite" style="display:none" aria-hidden="true">
+  <symbol id="icon-refresh" viewBox="0 0 20 20">
+    <path d="M16.2 6.3A7 7 0 1017 10"/>
+    <polyline points="16 2.2 16 6.3 11.9 6.3"/>
+  </symbol>
+  <symbol id="icon-undo" viewBox="0 0 20 20">
+    <polyline points="2 4.5 2 9 6.5 9"/>
+    <path d="M4 13.5A7.5 7.5 0 102.6 8.2"/>
+  </symbol>
+  <symbol id="icon-spectrogram" viewBox="0 0 20 20">
+    <line x1="3.5" y1="16.5" x2="3.5" y2="9.5"/>
+    <line x1="8.5" y1="16.5" x2="8.5" y2="3.5"/>
+    <line x1="13.5" y1="16.5" x2="13.5" y2="11"/>
+    <line x1="18" y1="16.5" x2="18" y2="6.5"/>
+  </symbol>
+  <symbol id="icon-trend" viewBox="0 0 20 20">
+    <polyline points="2 15 7.5 8.5 11.5 12.5 18 4.5"/>
+    <circle class="icon-fill" cx="18" cy="4.5" r="1.5"/>
+  </symbol>
+  <symbol id="icon-star" viewBox="0 0 20 20">
+    <path d="M10 1.6l2.6 5.4 5.9.8-4.3 4.2 1 5.9-5.2-2.8-5.2 2.8 1-5.9-4.3-4.2 5.9-.8z"/>
+  </symbol>
+  <symbol id="icon-close" viewBox="0 0 20 20">
+    <line x1="4.5" y1="4.5" x2="15.5" y2="15.5"/>
+    <line x1="15.5" y1="4.5" x2="4.5" y2="15.5"/>
+  </symbol>
+  <symbol id="icon-check" viewBox="0 0 20 20">
+    <polyline points="3 10.5 8 15 17 4"/>
+  </symbol>
+  <symbol id="icon-eye" viewBox="0 0 20 20">
+    <path d="M1.2 10S4.8 4 10 4s8.8 6 8.8 6-3.6 6-8.8 6-8.8-6-8.8-6z"/>
+    <circle cx="10" cy="10" r="2.4"/>
+  </symbol>
+  <symbol id="icon-cursor" viewBox="0 0 20 20">
+    <path d="M4 2l11 11-5 1.2-1.2 5z"/>
+  </symbol>
+  <symbol id="icon-price-level" viewBox="0 0 20 20">
+    <rect x="1.5" y="6.5" width="6" height="7" rx="1"/>
+    <line x1="9" y1="10" x2="18.5" y2="10" stroke-dasharray="2.2 2.2"/>
+  </symbol>
+  <symbol id="icon-target" viewBox="0 0 20 20">
+    <circle cx="10" cy="10" r="6.5"/>
+    <circle class="icon-fill" cx="10" cy="10" r="1.4"/>
+    <line x1="10" y1="0.8" x2="10" y2="3.3"/>
+    <line x1="10" y1="16.7" x2="10" y2="19.2"/>
+    <line x1="0.8" y1="10" x2="3.3" y2="10"/>
+    <line x1="16.7" y1="10" x2="19.2" y2="10"/>
+  </symbol>
+  <symbol id="icon-log-scale" viewBox="0 0 20 20">
+    <polyline points="3 2 3 17 18 17"/>
+    <path d="M3.5 16C5 11 7.5 5.5 17.5 3"/>
+  </symbol>
+  <symbol id="icon-variance" viewBox="0 0 20 20">
+    <polyline points="2 17 18 17"/>
+    <path d="M2 17C 5 17, 6 4, 10 4 S 15 17, 18 17"/>
+  </symbol>
+  <symbol id="icon-ma" viewBox="0 0 20 20">
+    <path d="M1.5 13 C 5 13, 5 7, 8.5 7 S 12 13, 15.5 13" stroke-dasharray="0"/>
+    <path d="M1.5 9 C 5 9, 5 11, 8.5 11 S 12 9, 15.5 9" stroke-dasharray="2 1.6"/>
+  </symbol>
+  <symbol id="icon-zigzag" viewBox="0 0 20 20">
+    <polyline points="1.5 14 6 5 10 12 14 4 18.5 11"/>
+  </symbol>
+  <symbol id="icon-volume" viewBox="0 0 20 20">
+    <line x1="3" y1="17" x2="3" y2="10"/>
+    <line x1="7" y1="17" x2="7" y2="6"/>
+    <line x1="11" y1="17" x2="11" y2="13"/>
+    <line x1="15" y1="17" x2="15" y2="8"/>
+  </symbol>
+  <symbol id="icon-band" viewBox="0 0 20 20">
+    <path d="M2 6.5C6 3.5,14 3.5,18 6.5"/>
+    <path d="M2 13.5C6 10.5,14 10.5,18 13.5"/>
+  </symbol>
+  <symbol id="icon-ensemble" viewBox="0 0 20 20">
+    <line x1="3" y1="10" x2="18" y2="3"/>
+    <line x1="3" y1="10" x2="18" y2="8"/>
+    <line x1="3" y1="10" x2="18" y2="13"/>
+    <line x1="3" y1="10" x2="18" y2="18"/>
+    <circle class="icon-fill" cx="3" cy="10" r="1.7"/>
+  </symbol>
+</svg>
+
+<div id="app">
+
+  <header id="toolbar">
+    <span class="logo">SMA</span>
+
+    <select id="interval-select">
+      <option value="1mo">1mo</option>
+      <option value="1w">1w</option>
+      <option value="1d" selected>1d</option>
+      <option value="1h">1h</option>
+      <option value="10m">10m</option>
+      <option value="1m">1m</option>
+    </select>
+
+    <button id="refresh-current-btn" class="btn-secondary" onclick="refreshCurrentTicker(this)"
+      title="Дозагрузить (или скачать с нуля) данные текущего тикера на текущем интервале">
+      <svg class="icon"><use href="#icon-refresh"/></svg> Обновить
+    </button>
+
+    <span id="statusbar"></span>
+  </header>
+
+  <main>
+    <aside id="left-panel">
+
+      <section id="quick-switcher" class="panel-section">
+        <h4>Тикеры</h4>
+        <input id="ticker-quick-filter" type="text" placeholder="Фильтр по избранному / всем добавленным" style="width:100%" autocomplete="off">
+        <div id="quick-ticker-list" style="margin-top:6px">
+          <span class="muted-val">Загрузка…</span>
+        </div>
+      </section>
+
+      <div class="accordion">
+        <div class="accordion-item">
+          <button class="accordion-header" onclick="toggleAccordion(this)">
+            <span class="accordion-arrow">▸</span> Менеджер тикеров
+          </button>
+          <div id="ticker-manager-body" class="accordion-body">
+
+            <section class="panel-section">
+              <h4>Мои тикеры</h4>
+              <div id="my-tickers-list">
+                <span class="muted-val">Загрузка…</span>
+              </div>
+            </section>
+
+            <section class="panel-section">
+              <h4>Добавить тикер</h4>
+              <div class="field-row">
+                <input id="ticker-search-input" type="text" placeholder="Тикер или название (можно пусто)" style="flex:1;width:auto" autocomplete="off">
+              </div>
+              <div class="field-row">
+                <select id="ticker-search-category" style="flex:1;width:auto">
+                  <option value="">Все</option>
+                  <option value="tqbr">Акции (TQBR)</option>
+                  <option value="bond">Облигации</option>
+                  <option value="fund">Фонды (ETF/ПИФ)</option>
+                  <option value="index">Индексы</option>
+                  <option value="currency">Валюта</option>
+                  <option value="metal">Металлы</option>
+                  <option value="futures">Фьючерсы</option>
+                  <option value="option">Опционы</option>
+                </select>
+              </div>
+              <button id="ticker-search-btn" onclick="searchTickers()" style="width:100%;margin-top:6px">
+                Найти
+              </button>
+              <div id="ticker-search-results" style="margin-top:8px"></div>
+            </section>
+
+          </div>
+        </div>
+      </div>
+
+      <section id="task-status" class="panel-section">
+        <h4>Текущая задача</h4>
+        <div id="task-status-body">
+          <span class="muted-val">Нет активных задач</span>
+        </div>
+      </section>
+
+      <div class="accordion">
+        <div class="accordion-item">
+          <button class="accordion-header" onclick="toggleAccordion(this)">
+            <span class="accordion-arrow">▸</span> Менеджер задач
+          </button>
+          <div id="task-manager-body" class="accordion-body">
+
+            <section class="panel-section">
+              <button id="tasks-resume-all-btn" onclick="resumeAllTasks()" style="width:100%" disabled>
+                Запустить всё
+              </button>
+            </section>
+
+            <section class="panel-section">
+              <div id="task-list">
+                <span class="muted-val">Загрузка…</span>
+              </div>
+            </section>
+
+          </div>
+        </div>
+      </div>
+
+      <div class="accordion">
+        <div class="accordion-item">
+          <button class="accordion-header" onclick="toggleAccordion(this)">
+            <span class="accordion-arrow">▸</span> Настройки приложения
+          </button>
+          <div id="app-settings-body" class="accordion-body">
+
+            <section class="panel-section">
+              <h4>
+                Производительность
+                <span class="info-badge" data-tip=
+"Параллельных запросов к MOEX — при отборе пула калибровки/претеста (ранжирование по ликвидности) на каждого кандидата-тикера идёт отдельный HTTP-запрос; это ограничивает, сколько идёт одновременно. Меньше — медленнее, но мягче к сети.
+
+Потоков вычислений (CPU) — лимит на параллельные CPU-bound задачи (сейчас единственная такая — калибровка λ: ProcessPoolExecutor, один процесс на каждый T). 0 = авто (ядра CPU / 4 — numpy-операции упираются в память, не в ядра, агрессивные значения только всё замедляют).">?</span>
+              </h4>
+              <div class="field-row">
+                <label>Запросов к MOEX</label>
+                <input id="settings-moex-workers" type="number" value="16" min="1" max="64">
+              </div>
+              <div class="field-row">
+                <label>Потоков вычислений (CPU)</label>
+                <input id="settings-calibration-workers" type="number" value="0" min="0" max="64"
+                  title="0 = авто (ядра CPU / 4). Сейчас применяется только к калибровке λ — единственной CPU-bound параллельной задаче в приложении.">
+              </div>
+              <button id="settings-save-btn" onclick="saveAppSettings()" style="width:100%;margin-top:6px">
+                Применить
+              </button>
+            </section>
+
+          </div>
+        </div>
+      </div>
+
+    </aside>
+
+    <div id="chart-wrap">
+      <div id="chart"></div>
+    </div>
+
+    <aside id="panel">
+
+      <div id="tab-bar">
+        <button class="tab-btn active" data-tab="main"       onclick="switchTab('main')">Основной график</button>
+        <button class="tab-btn"        data-tab="oscillator" onclick="switchTab('oscillator')">Осциллятор</button>
+      </div>
+
+      <!-- ── Вкладка: Основной график ──────────────────────────────────── -->
+      <div id="tab-main" class="tab-pane active">
+
+        <!-- Три визуальные группы инструментов (project feedback
+             2026-08-18, round 8: "группировка... нужна, а то путаница" —
+             восстановлено после кратковременного единого тулбара round 7),
+             но ОДИН слот выбора (S.activeMainTool, sma/ui/tools.js) и ОДНА
+             панель настроек ниже для всех трёх ("с одним блоком настроек
+             всё верно" — это отличие от исходной, до-round-7 схемы
+             осталось). Лог-масштаб/показать-скрыть объекты/сброс origin —
+             НЕ инструменты, независимые тумблеры в тулбарах своих секций. -->
+        <section class="panel-section" style="padding-bottom:6px">
+          <h4>
+            Курсор
+            <span class="info-badge" data-tip=
+"Режим клика по основному графику — только один активен одновременно (делит слот выбора с Анализом и Прогнозом ниже, см. их подсказки).
+
+Свободная мышь — обычный клик, ничего не создаёт (клик по свече по-прежнему ставит точку отсчёта активного инструмента, если это аналитик или модель прогноза).
+
+Ценовой уровень — клик ставит/двигает горизонтальную линию по цене клика, пока не нажата «Зафиксировать»; после фиксации следующий клик начинает новый уровень. Список уровней — ниже, с удалением по одному или «Очистить всё».
+
+Выбор объектов — клик по маркеру прогноза на графике показывает его результат и позволяет закрепить отображение, БЕЗ переключения на инструмент этой модели — отдельный, самостоятельный режим просмотра.">?</span>
+          </h4>
+          <div class="tool-toolbar">
+            <span id="cursor-tool-buttons"></span>
+            <span class="tool-spacer"></span>
+            <button class="tool-btn" id="log-scale-btn" title="Логарифмический масштаб основного графика"
+              onclick="toggleMainLogScale()">
+              <svg class="icon"><use href="#icon-log-scale"/></svg>
+            </button>
+            <button class="tool-btn active" id="show-objects-btn" title="Показать/скрыть активные объекты на графике"
+              onclick="toggleObjectsHidden()">
+              <svg class="icon"><use href="#icon-eye"/></svg>
+            </button>
+          </div>
+        </section>
+
+        <section class="panel-section" style="padding-bottom:6px">
+          <h4>
+            Анализ
+            <span class="info-badge" data-tip=
+"Каждая иконка — отдельный анализатор со своими настройками (как инструменты в графическом редакторе). Клик по иконке открывает её панель настроек снизу и делает её «активной» — клики по графику (если у анализатора есть точка отсчёта) идут именно ей, пока активен режим курсора «Свободная мышь».
+
+«Показывать на графике» — независимая галочка внутри панели, НЕ связана с тем, какая иконка сейчас активна: можно держать включённым сразу несколько анализаторов одновременно.
+
+⟲ в тулбаре — сбросить точку отсчёта активного инструмента на «живой» режим (последний бар); появляется только когда у активного инструмента есть точка отсчёта.">?</span>
+          </h4>
+          <div class="tool-toolbar">
+            <span id="main-tool-buttons"></span>
+            <span class="tool-spacer"></span>
+            <button class="tool-btn" id="tool-reset-origin-btn" title="Сбросить точку отсчёта активного инструмента"
+              onclick="resetActiveToolOrigin()" style="display:none">
+              <svg class="icon"><use href="#icon-undo"/></svg>
+            </button>
+          </div>
+        </section>
+
+        <section class="panel-section" style="padding-bottom:6px">
+          <h4>
+            Прогноз
+            <span class="info-badge" data-tip=
+"Каждая модель прогноза — свой инструмент (как анализаторы выше): своя история, свои результаты, свой расчёт и своё закрепление на графике. Пока активна модель, клик по графику (курсор «Свободная мышь») ставит ЕЁ точку отсчёта, а клик по маркеру на графике выбирает только прогнозы ЭТОЙ модели — прогнозы другой модели откроются по клику, только если включён курсор «Выбор объектов».">?</span>
+          </h4>
+          <div class="tool-toolbar">
+            <span id="forecast-tool-buttons"></span>
+          </div>
+        </section>
+
+        <section class="panel-section">
+
+          <div id="tool-panel-free" style="display:none">
+            <p class="muted-val">Обычный клик по графику ничего не делает — свободный просмотр, точка отсчёта не выставляется.</p>
+          </div>
+
+          <div id="tool-panel-price_level" style="display:none">
+            <button type="button" onclick="fixPendingPriceLevel()" style="width:100%;margin-top:6px" id="price-level-fix-btn" disabled>
+              Зафиксировать
+            </button>
+            <div id="price-level-list" style="margin-top:6px"><span class="muted-val">Нет зафиксированных уровней</span></div>
+            <button type="button" class="btn-secondary" onclick="clearPriceLevels()" style="width:100%;margin-top:4px">
+              Очистить всё
+            </button>
+          </div>
+
+          <div id="tool-panel-object_select" style="display:none">
+            <p class="muted-val">Клик по маркеру прогноза на графике покажет его результат ниже — без переключения на инструмент этой модели.</p>
+            <section class="panel-section" id="results-section-object_select" style="display:none">
+              <h4 style="display:flex;align-items:center;gap:6px">
+                Результат
+                <button class="hist-eye-btn" id="object-select-pin-btn" onclick="toggleSelectedForecastPin()"
+                  title="Закрепить/снять отображение на графике"><svg class="icon"><use href="#icon-eye"/></svg></button>
+              </h4>
+              <div id="results-object_select"></div>
+            </section>
+          </div>
+
+          <div id="tool-panel-trend_ruler" style="display:none">
+            <div class="field-row">
+              <label>Окно (баров)</label>
+              <input id="tr-window" type="number" value="200" min="10" max="2000" step="1" style="width:80px"
+                oninput="onTrendRulerWindowInput(this.value)">
+            </div>
+            <input id="tr-window-range" type="range" min="10" max="2000" step="1" value="200"
+              style="width:100%" oninput="onTrendRulerWindowInput(this.value)"
+              title="Грубая настройка окна — точное значение можно ввести в поле выше">
+
+            <div class="field-row">
+              <label>Полосы (k·std)</label>
+            </div>
+            <div id="tr-bands-list"></div>
+            <button type="button" onclick="addTrendRulerBand()" style="width:100%;margin:2px 0 6px">
+              + Добавить полосу
+            </button>
+            <div class="field-row checkbox-row">
+              <label><input id="tr-show-bands" type="checkbox" checked onchange="onTrendRulerSettingsChange()"> Показывать полосы (заливка)</label>
+            </div>
+            <div class="field-row checkbox-row">
+              <label><input id="tr-show-band-borders" type="checkbox" checked onchange="onTrendRulerSettingsChange()"> Показывать границы (пунктир)</label>
+            </div>
+            <div class="field-row">
+              <label>Прозрачность полос</label>
+              <span id="tr-band-opacity-label" class="muted-val">18%</span>
+            </div>
+            <input id="tr-band-opacity" type="range" min="4" max="60" step="1" value="18"
+              style="width:100%" oninput="document.getElementById('tr-band-opacity-label').textContent=this.value+'%'; onTrendRulerSettingsChange()">
+
+            <div class="field-row checkbox-row">
+              <label><input id="tr-extend-bands" type="checkbox" onchange="onTrendRulerSettingsChange()"> Экстраполировать полосы (заливку)</label>
+            </div>
+            <div class="field-row checkbox-row">
+              <label><input id="tr-extend-borders" type="checkbox" checked onchange="onTrendRulerSettingsChange()"> Экстраполировать границы</label>
+            </div>
+            <div class="field-row">
+              <label>n (шагов вперёд)</label>
+              <input id="tr-n-future" type="number" value="50" min="1" max="500" step="1"
+                oninput="onTrendRulerSettingsChange()"
+                title="Общее число шагов для обоих видов экстраполяции">
+            </div>
+            <div class="field-row checkbox-row">
+              <label><input id="tr-show-accel-fan" type="checkbox" onchange="onTrendRulerSettingsChange()"> Веер ускорения (вспомогательно)</label>
+            </div>
+            <div class="field-row">
+              <label>m (точек усреднения)</label>
+              <input id="tr-m-accel" type="number" value="50" min="3" max="200" step="1"
+                oninput="onTrendRulerSettingsChange()">
+            </div>
+            <div class="field-row">
+              <label>n (шагов ускорения)</label>
+              <input id="tr-n-accel" type="number" value="50" min="1" max="200" step="1"
+                oninput="onTrendRulerSettingsChange()">
+            </div>
+
+            <div class="field-row">
+              <span id="tr-meta" class="muted-val">—</span>
+            </div>
+            <div class="field-row">
+              <label>Точка отсчёта</label>
+              <span id="tr-origin-label" class="muted-val">последний бар (живой)</span>
+            </div>
+            <p class="muted-val" style="margin:2px 0 6px">
+              Пока этот инструмент активен (иконка в тулбаре), клик по свече на графике ставит точку
+              отсчёта сюда — сброс кнопкой ⟲ в тулбаре. Тренд и полосы обновляются сразу при изменении
+              настроек — без «Рассчитать».
+            </p>
+
+            <div class="field-row checkbox-row">
+              <label><input id="tr-show-chart" type="checkbox" onchange="onTrendRulerSettingsChange()"> Показывать на графике</label>
+            </div>
+          </div>
+
+          <div id="tool-panel-moving_averages" style="display:none">
+            <div class="field-row">
+              <label>Линии</label>
+            </div>
+            <div id="ma-list"></div>
+            <button type="button" onclick="addMovingAverage()" style="width:100%;margin:2px 0 6px">
+              + Добавить среднюю
+            </button>
+            <div class="field-row checkbox-row">
+              <label><input id="ma-show-chart" type="checkbox" onchange="onMaSettingsChange()"> Показывать на графике</label>
+            </div>
+          </div>
+
+          <div id="tool-panel-zigzag_tool" style="display:none">
+            <div class="field-row">
+              <label>Наборы (T%, min_bars)</label>
+            </div>
+            <div id="zz-list"></div>
+            <button type="button" onclick="addZigzagSeries()" style="width:100%;margin:2px 0 6px">
+              + Добавить зигзаг
+            </button>
+            <div class="field-row checkbox-row">
+              <label><input id="zz-show-chart" type="checkbox" onchange="onZigzagToolShowChartChange()"> Показывать на графике</label>
+            </div>
+            <p class="muted-val" style="margin:2px 0 6px">
+              Независимо от зигзага модели band_lambda ниже — свой набор порогов T,
+              каждый набор считается отдельным запросом.
+            </p>
+          </div>
+
+          <div id="tool-panel-band_lambda" style="display:none">
+
+            <section class="panel-section" id="results-section-band_lambda" style="display:none">
+              <h4>Результат</h4>
+              <div id="results-band_lambda"></div>
+            </section>
+
+            <section class="panel-section">
+              <h4>
+                T (порог зигзага)
+                <span class="info-badge" data-tip="Только уже откалиброванные значения T. Новые T добавляются в разделе «Калибровка» ниже.">?</span>
+              </h4>
+              <div id="bl-t-selector">
+                <span class="muted-val">Нет калибровок — откройте «Калибровка» ниже</span>
+              </div>
+              <div id="bl-t-pool-variants"></div>
+              <button id="bl-forecast-btn" onclick="submitForecast()" style="margin-top:8px;width:100%" disabled>
+                ▶ Прогноз (последнее событие)
+              </button>
+              <small class="hint">Клик по графику ставит точку отсчёта — кнопка возьмёт последнее подтверждённое событие зигзага до неё (или точно на ней). Клик по треугольнику — открыть готовый прогноз.</small>
+            </section>
+
+            <div class="accordion">
+              <div class="accordion-item">
+                <button class="accordion-header" onclick="toggleAccordion(this)">
+                  <span class="accordion-arrow">▸</span> Калибровка
+                </button>
+                <div class="accordion-body">
+
+                  <section class="panel-section">
+                    <h4>
+                      Пул калибровки
+                      <span class="info-badge" data-tip="Автоотбор по категории + обороту (топ-N), без ручного выбора тикеров. Несколько категорий — union с дедупом (напр. металлы+акции, если металлов не хватает по глубине).">?</span>
+                    </h4>
+                    <div class="field-row checkbox-row"><label><input type="checkbox" class="bl-pool-cat" value="stock" checked> Акции</label></div>
+                    <div class="field-row checkbox-row"><label><input type="checkbox" class="bl-pool-cat" value="bond"> Облигации</label></div>
+                    <div class="field-row checkbox-row"><label><input type="checkbox" class="bl-pool-cat" value="fund"> Фонды (ПИФ)</label></div>
+                    <div class="field-row checkbox-row"><label><input type="checkbox" class="bl-pool-cat" value="currency"> Валюта</label></div>
+                    <div class="field-row checkbox-row"><label><input type="checkbox" class="bl-pool-cat" value="metal"> Металлы</label></div>
+                    <div class="field-row checkbox-row"><label><input type="checkbox" class="bl-pool-cat" value="futures"> Фьючерсы</label></div>
+                    <div class="field-row">
+                      <label>N на категорию</label>
+                      <input id="bl-pool-n" type="number" value="25" min="1" max="200">
+                    </div>
+                  </section>
+
+                  <section class="panel-section">
+                    <h4>Уровни T</h4>
+                    <div id="bl-calib-targets-list"></div>
+                    <button id="bl-calib-target-add-btn" onclick="addCalibTargetRow()" style="width:100%;margin-top:6px">+ Добавить T</button>
+                  </section>
+
+                  <section class="panel-section">
+                    <h4>
+                      Параметры модели
+                      <span class="info-badge" data-tip="m — размерность вложения (число плечей зигзага в векторе запроса). θ — доп. локализация S-map по вектору (0 = только λ-веса пула; калибровка θ не пережила OOS-проверку ни на одном из тестовых тикеров, дефолт 0 не просто так).">?</span>
+                    </h4>
+                    <div class="field-row">
+                      <label>m</label>
+                      <input id="bl-calib-m" type="number" value="6" min="1" max="30">
+                    </div>
+                    <div class="field-row">
+                      <label>θ</label>
+                      <input id="bl-calib-theta" type="number" value="0" min="0" step="0.1">
+                    </div>
+                  </section>
+
+                  <section class="panel-section">
+                    <div class="field-row">
+                      <button id="bl-pretest-btn" onclick="runPretest()" style="flex:1;margin-right:6px">Претест</button>
+                      <button id="bl-calibrate-btn" onclick="runCalibration()" style="flex:1">Калибровать</button>
+                    </div>
+                    <div id="bl-pretest-result"></div>
+                  </section>
+
+                  <section class="panel-section">
+                    <h4>Откалиброванные наборы</h4>
+                    <div id="bl-settings-list"><span class="muted-val">—</span></div>
+                  </section>
+
+                </div>
+              </div>
+            </div>
+
+            <div class="accordion">
+              <div class="accordion-item">
+                <button class="accordion-header" onclick="toggleAccordion(this)">
+                  <span class="accordion-arrow">▸</span> Отображение
+                </button>
+                <div class="accordion-body">
+                  <section class="panel-section">
+                    <div class="field-row checkbox-row">
+                      <label><input id="bl-show-zigzag" type="checkbox" checked onchange="toggleZigzagDisplay()"> Зигзаг на графике</label>
+                    </div>
+                    <div class="field-row">
+                      <label>Ширина шага</label>
+                      <span id="bl-band-width-label" class="muted-val">5 бар.</span>
+                    </div>
+                    <input id="bl-band-width-slider" type="range" min="1" max="300" step="1" value="5"
+                      style="width:100%" oninput="applyBandWidth()">
+                    <small class="hint">Полосы прогноза не предсказывают ВРЕМЯ события — двигайте ширину, чтобы визуально «подтянуть» поле под текущую дату.</small>
+
+                    <h4 style="margin-top:12px">
+                      Зоны вероятности
+                      <span class="info-badge" data-tip="Каждый чекбокс — центральный интервал вокруг медианы (напр. «50%» = средние 50% исходов, от 25-го до 75-го перцентиля). Включённые зоны одного шага накладываются друг на друга — более узкая поверх более широкой.">?</span>
+                    </h4>
+                    <div id="bl-display-levels-box"></div>
+                    <div class="field-row" style="margin-top:6px">
+                      <label>Прозрачность уровня</label>
+                      <input id="bl-display-opacity" type="range" min="0.05" max="0.6" step="0.01" value="0.22">
+                    </div>
+                    <button onclick="applyDisplaySettings()" style="width:100%;margin-top:6px" title="Применить и сохранить как настройки по умолчанию">Применить</button>
+                  </section>
+                </div>
+              </div>
+            </div>
+
+            <section class="panel-section">
+              <h4>История прогнозов</h4>
+              <div id="history-band_lambda"></div>
+            </section>
+
+          </div><!-- /tool-panel-band_lambda -->
+
+          <div id="tool-panel-simplex_ensemble" style="display:none">
+
+            <section class="panel-section" id="results-section-simplex_ensemble" style="display:none">
+              <h4>Результат</h4>
+              <div id="results-simplex_ensemble"></div>
+            </section>
+
+            <section class="panel-section">
+              <h4>Ансамбль по origin</h4>
+              <button id="simplex-forecast-btn" onclick="submitSimplexForecast()" style="width:100%">
+                ▶ Прогноз (ансамбль по origin)
+              </button>
+              <small class="hint">Точка отсчёта (origin) — последний ИЗВЕСТНЫЙ бар: клик по графику ставит маркер и прогноз строится от него (первый шаг предсказывает бар СЛЕДУЮЩИЙ за маркером); без клика — от последнего доступного бара.</small>
+            </section>
+
+            <div class="accordion">
+              <div class="accordion-item">
+                <button class="accordion-header" onclick="toggleAccordion(this)">
+                  <span class="accordion-arrow">▸</span> Параметры
+                </button>
+                <div class="accordion-body">
+
+                  <section class="panel-section">
+                    <h4>Ансамбль</h4>
+                    <div class="field-row">
+                      <label>Окно W (число origin)</label>
+                      <input id="simplex-window" type="number" value="10" min="1" max="30">
+                    </div>
+                    <div class="field-row">
+                      <label>Горизонт H (баров)</label>
+                      <input id="simplex-horizon" type="number" value="20" min="1" max="100">
+                    </div>
+                  </section>
+
+                  <section class="panel-section">
+                    <h4>
+                      Согласование тракта
+                      <span class="info-badge" data-tip="m = x·d + y — размерность вложения от локальной размерности d (Этап 1, PCA-sweep). K_filter = 3·(m+1)+ξ — запас соседей для LP-фильтра/LP-коррекции. K_cascade = d+1 — синхронизировано с Simplex projection, не настраивается.">?</span>
+                    </h4>
+                    <div class="field-row">
+                      <label>x</label>
+                      <input id="simplex-xy-x" type="number" value="3" min="1" max="10">
+                    </div>
+                    <div class="field-row">
+                      <label>y</label>
+                      <input id="simplex-xy-y" type="number" value="0" min="0" max="20">
+                    </div>
+                    <div class="field-row">
+                      <label>ξ (добавка к K_filter)</label>
+                      <input id="simplex-xi-add" type="number" value="1" min="0" max="20">
+                    </div>
+                    <div class="field-row">
+                      <label>α (форма ↔ амплитуда)</label>
+                      <span id="simplex-blend-alpha-label" class="muted-val">0.50</span>
+                    </div>
+                    <input id="simplex-blend-alpha" type="range" min="0" max="1" step="0.05" value="0.5"
+                      style="width:100%" oninput="document.getElementById('simplex-blend-alpha-label').textContent = (+this.value).toFixed(2)">
+                  </section>
+
+                  <section class="panel-section">
+                    <h4>Каскадный поиск</h4>
+                    <div class="field-row">
+                      <label>Уровней каскада</label>
+                      <input id="simplex-n-levels" type="number" value="6" min="1" max="6">
+                    </div>
+                    <div class="field-row">
+                      <label>Макс. окно каскада</label>
+                      <input id="simplex-p-cascade-max" type="number" value="5000" min="100" max="10000" step="100">
+                    </div>
+                    <div class="field-row checkbox-row">
+                      <label><input id="simplex-use-all-bars" type="checkbox" checked
+                        onchange="document.getElementById('simplex-bars').disabled = this.checked"> Все точки библиотеки</label>
+                    </div>
+                    <div class="field-row">
+                      <label>Точек в библиотеке</label>
+                      <input id="simplex-bars" type="number" value="3000" min="100" max="5000" step="100" disabled>
+                    </div>
+                  </section>
+
+                  <section class="panel-section">
+                    <h4>
+                      PCA (Этап 1)
+                      <span class="info-badge" data-tip="Считается один раз по главному origin: диапазон m для sweep локальной размерности и пороги накопленной дисперсии → d_min/d_max, общие для всего окна W.">?</span>
+                    </h4>
+                    <div class="field-row">
+                      <label>Диапазон m — от</label>
+                      <input id="simplex-pca-p-min" type="number" value="3" min="2" max="300">
+                    </div>
+                    <div class="field-row">
+                      <label>Диапазон m — до</label>
+                      <input id="simplex-pca-p-max" type="number" value="150" min="2" max="300">
+                    </div>
+                    <div class="field-row">
+                      <label>Порог τ₁ (d_min)</label>
+                      <input id="simplex-pca-thr1" type="number" value="0.80" min="0.5" max="0.99" step="0.01">
+                    </div>
+                    <div class="field-row">
+                      <label>Порог τ₂ (d_max)</label>
+                      <input id="simplex-pca-thr2" type="number" value="0.85" min="0.5" max="0.99" step="0.01">
+                    </div>
+                  </section>
+
+                  <section class="panel-section">
+                    <div class="field-row checkbox-row">
+                      <label><input id="simplex-use-lp-corr" type="checkbox" checked> LP-коррекция траектории</label>
+                    </div>
+                  </section>
+
+                </div>
+              </div>
+            </div>
+
+            <div class="accordion">
+              <div class="accordion-item">
+                <button class="accordion-header" onclick="toggleAccordion(this)">
+                  <span class="accordion-arrow">▸</span> Отображение
+                </button>
+                <div class="accordion-body">
+                  <section class="panel-section">
+                    <div class="field-row checkbox-row">
+                      <label><input id="simplex-show-mean" type="checkbox" checked onchange="refreshSimplexDisplay()"> Показывать среднее + полосу</label>
+                    </div>
+                    <div class="field-row">
+                      <label>Ширина полосы P</label>
+                      <span id="simplex-band-pct-label" class="muted-val">50%</span>
+                    </div>
+                    <input id="simplex-band-pct" type="range" min="0" max="100" step="1" value="50"
+                      style="width:100%" oninput="onSimplexBandPctChange(this.value)">
+                    <small class="hint">P=50 → полоса p25–p75 по ансамблю; P=90 → p5–p95.</small>
+                  </section>
+                </div>
+              </div>
+            </div>
+
+            <section class="panel-section">
+              <h4>История прогнозов</h4>
+              <div id="history-simplex_ensemble"></div>
+            </section>
+
+          </div><!-- /tool-panel-simplex_ensemble -->
+
+        </section>
+
+      </div><!-- /tab-main -->
+
+      <!-- ── Вкладка: Осциллятор ───────────────────────────────────────── -->
+      <div id="tab-oscillator" class="tab-pane">
+
+        <section class="panel-section" style="padding-bottom:6px">
+          <h4>
+            Осциллятор
+            <span class="info-badge" data-tip=
+"Аналитические инструменты, рисующие только в нижней панели графика (осциллятор) — в отличие от вкладки «Основной график», здесь показать может только ОДИН инструмент одновременно (общая панель, физически одна область).">?</span>
+          </h4>
+          <div class="tool-toolbar">
+            <span id="oscillator-tool-buttons"></span>
+          </div>
+        </section>
+
+        <section class="panel-section">
+          <p class="muted-val" id="no-tool-selected-hint-osc">Выберите инструмент выше.</p>
+
+          <div id="tool-panel-variance_osc" style="display:none">
+            <div class="field-row">
+              <label>Окно (баров)</label>
+              <input id="vo-window" type="number" value="200" min="10" max="2000" step="1" style="width:80px"
+                oninput="onVarianceOscWindowInput(this.value)">
+            </div>
+            <input id="vo-window-range" type="range" min="10" max="2000" step="1" value="200"
+              style="width:100%" oninput="onVarianceOscWindowInput(this.value)"
+              title="Грубая настройка окна — точное значение можно ввести в поле выше">
+            <button type="button" class="btn-secondary" onclick="pullWindowFromRuler()" style="width:100%;margin-top:6px"
+              title="Скопировать текущее значение окна из «Линейка тренда» (основной график) — разовое копирование, не постоянная связь">
+              Подтянуть окно с линейки
+            </button>
+
+            <div class="field-row" style="margin-top:6px">
+              <label>Осциллятор</label>
+              <select id="vo-osc-mode" style="flex:1;width:auto" onchange="setVarianceOscMode()">
+                <option value="slope" selected>Тренд (slope)</option>
+                <option value="var">Дисперсия (resid_var)</option>
+              </select>
+            </div>
+            <div class="field-row checkbox-row">
+              <label><input id="vo-show-oscillator" type="checkbox" onchange="toggleVarianceOscillator()"> Показать осциллятор</label>
+            </div>
+          </div>
+
+          <div id="tool-panel-volume" style="display:none">
+            <div class="field-row checkbox-row">
+              <label><input id="vol-show-oscillator" type="checkbox" onchange="toggleVolumeDisplay()"> Показать осциллятор</label>
+            </div>
+            <p class="muted-val" style="margin:2px 0 6px">
+              Цвет бара — как у свечи (close ≥ open — зелёный, иначе красный).
+            </p>
+          </div>
+
+          <div id="tool-panel-spectrogram" style="display:none">
+            <div class="field-row">
+              <label>Глубина (баров)</label>
+              <input id="spectrogram-depth" type="number" value="500" min="0" max="20000" step="50"
+                title="0 = вся доступная история">
+            </div>
+            <div class="field-row">
+              <label>Окно STFT</label>
+              <select id="spectrogram-nperseg" style="flex:1;width:auto">
+                <option value="4">4</option>
+                <option value="8">8</option>
+                <option value="16">16</option>
+                <option value="32">32</option>
+                <option value="64" selected>64</option>
+                <option value="128">128</option>
+                <option value="256">256</option>
+                <option value="512">512</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <label>Перекрытие</label>
+              <span id="spectrogram-overlap-label" class="muted-val">75%</span>
+            </div>
+            <input id="spectrogram-overlap" type="range" min="50" max="95" step="1" value="75"
+              style="width:100%" oninput="document.getElementById('spectrogram-overlap-label').textContent=this.value+'%'">
+            <div class="field-row">
+              <label>Мин. частота</label>
+              <select id="spectrogram-fmin" style="flex:1;width:auto">
+                <option value="0" selected>0 (пост. составл.)</option>
+                <option value="0.0078125">128 бар</option>
+                <option value="0.015625">64 бара</option>
+                <option value="0.03125">32 бара</option>
+                <option value="0.0625">16 бар</option>
+                <option value="0.125">8 бар</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <label>Макс. частота</label>
+              <select id="spectrogram-fmax" style="flex:1;width:auto">
+                <option value="0.5" selected>2 бара (Найквист)</option>
+                <option value="0.25">4 бара</option>
+                <option value="0.125">8 бар</option>
+                <option value="0.0625">16 бар</option>
+                <option value="0.03125">32 бара</option>
+                <option value="0.015625">64 бара</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <label>Контрастность</label>
+              <span id="spectrogram-contrast-label" class="muted-val">5%</span>
+            </div>
+            <input id="spectrogram-contrast" type="range" min="1" max="20" step="1" value="5"
+              style="width:100%"
+              oninput="document.getElementById('spectrogram-contrast-label').textContent=this.value+'%'; applySpectrogramContrast()">
+            <div class="field-row checkbox-row">
+              <label><input id="spectrogram-logy" type="checkbox" onchange="applySpectrogramContrast()"> Логарифмическая ось частот</label>
+            </div>
+            <div class="field-row checkbox-row">
+              <label><input id="spectrogram-show" type="checkbox" onchange="toggleSpectrogramDisplay()"> Показать осциллятор</label>
+            </div>
+            <div class="field-row">
+              <span id="spectrogram-meta" class="muted-val">—</span>
+            </div>
+            <button id="spectrogram-calculate-btn" onclick="calculateSpectrogram()" style="width:100%;margin-top:6px"
+              title="Каждый параметр выше меняет сам запрос к STFT — расчёт заново по кнопке, не мгновенный">
+              Рассчитать
+            </button>
+          </div>
+        </section>
+
+      </div><!-- /tab-oscillator -->
+
+    </aside>
+  </main>
+</div>
+
+<script type="module" src="/ui/app.js"></script>
+</body>
+</html>

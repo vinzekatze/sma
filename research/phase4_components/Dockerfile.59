@@ -1,0 +1,27 @@
+# Build context: project root (sma/)
+#   docker build -f research/phase4_components/Dockerfile.59 -t sma-schr59 .
+#
+# Run (figures + лог → research/phase4_components/output59/ на хосте):
+#   docker run --rm -v "%cd%\research\phase4_components\output59:/app/research/figures" sma-schr59
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    "numpy>=1.24" \
+    "scipy>=1.10" \
+    "matplotlib>=3.7"
+
+# Данные: все тикеры (копируем директорию целиком)
+COPY data/candles/ /app/data/candles/
+
+# Скрипт (sma-пакет не нужен — всё реализовано inline)
+COPY research/phase4_components/59_schreiber_lwr.py \
+     /app/research/phase4_components/59_schreiber_lwr.py
+
+RUN mkdir -p /app/research/figures
+
+# stdout + stderr пишутся в 59_output.txt (в смонтированный volume)
+CMD ["sh", "-c", \
+     "python -u research/phase4_components/59_schreiber_lwr.py 2>&1 | tee /app/research/figures/59_output.txt"]

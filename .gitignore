@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# venv
+.venv/
+
+# DB
+*.db
+*.db-shm
+*.db-wal
+
+# Data caches (re-fetchable from MOEX)
+data/
+
+# Research outputs (generated, large — code/README tracked, results/figures not)
+research/**/results/
+research/**/figures/
+
+# Misc generated / editor
+.obsidian/
+output60/
+*.zip
+causality_check.html

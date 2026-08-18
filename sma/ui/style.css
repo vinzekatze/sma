@@ -1,0 +1,800 @@
+:root {
+  --bg:       #0d1117;
+  --bg2:      #161b22;
+  --bg3:      #21262d;
+  --border:   #30363d;
+  --text:     #c9d1d9;
+  --muted:    #8b949e;
+  --accent:   #58a6ff;
+  --accent-dim: #58a6ff33;
+  --green:    #3fb950;
+  --red:      #f85149;
+  --yellow:   #d29922;
+  --orange:   #db6d28;
+  --panel:      268px;
+  --left-panel: 300px;
+  --toolbar:    46px;
+
+  /* Spacing scale — 4px base, matches the rhythm most of the existing
+     hand-picked paddings already landed on by feel (4/6/8/10/12px). */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+
+  /* Radius scale — small for controls/badges, medium for panels/popovers. */
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 8px;
+
+  /* Font scale — existing sizes (9.5-16px) collapsed to a deliberate set. */
+  --fs-xs:   10px;
+  --fs-sm:   11px;
+  --fs-base: 12px;
+  --fs-md:   13px;
+  --fs-lg:   15px;
+
+  /* Numeric/mono stack — reserved for actual numbers (inputs, table cells,
+     result values): a data/instrument-panel register distinct from the UI
+     sans, tabular figures so columns of numbers align. */
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+
+  --transition-fast: 120ms ease;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  height: 100vh;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+
+/* ── icon sprite use ── (symbols defined once in index.html, see #icon-sprite) */
+.icon {
+  width: 1em;
+  height: 1em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: -0.15em;
+  flex-shrink: 0;
+}
+.icon.icon-fill { fill: currentColor; stroke: none; }
+
+/* Numeric register — tabular figures so stacked numbers align by digit. */
+input[type="number"],
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+/* ── toolbar ── */
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: var(--toolbar);
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.logo {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--accent);
+  letter-spacing: 1px;
+  margin-right: 4px;
+}
+
+#statusbar {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#statusbar.err  { color: var(--red); }
+#statusbar.ok   { color: var(--green); }
+#statusbar.busy { color: var(--yellow); }
+
+/* ── main layout ── */
+main { display: flex; flex: 1; overflow: hidden; }
+
+#chart-wrap {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+#chart { width: 100%; height: 100%; }
+
+/* ── panel ── */
+#panel {
+  width: var(--panel);
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  overflow-x: hidden; /* setting only overflow-y implicitly computes overflow-x:auto per spec
+                          — was silently clipping any nowrap content wider than the panel
+                          (e.g. two flex:1 buttons sharing a row) instead of wrapping it */
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ── left panel (ticker manager, future: settings) ── */
+#left-panel {
+  width: var(--left-panel);
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  overflow-x: hidden; /* same implicit overflow-x:auto issue as #panel above */
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.ticker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.ticker-row:last-child { border-bottom: none; }
+
+.ticker-row .ticker-main {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 2px 4px;
+  margin: -2px 0 -2px -4px;
+}
+.ticker-row .ticker-main:hover { background: var(--bg3); }
+.ticker-row .ticker-name {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ticker-row .ticker-badge {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+  text-transform: uppercase;
+}
+.ticker-row .coverage-line {
+  color: var(--muted);
+  font-size: 10.5px;
+  margin-top: 2px;
+}
+.coverage-badge { margin-right: 6px; white-space: nowrap; }
+
+.fav-star {
+  background: none;
+  border: none;
+  color: var(--border);
+  font-size: 15px;
+  padding: 0 2px;
+  cursor: pointer;
+  line-height: 1;
+}
+.fav-star:hover { color: var(--yellow); filter: none; }
+.fav-star.active { color: var(--yellow); }
+
+.icon-btn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 2px 4px;
+  cursor: pointer;
+  line-height: 1;
+  border-radius: 2px;
+  font-weight: 400;
+  filter: none;
+}
+.icon-btn:hover { color: var(--accent); background: none; filter: none; }
+.icon-btn.danger:hover { color: var(--red); }
+
+.sec-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.sec-row:last-child { border-bottom: none; }
+.sec-row .sec-main { flex: 1; min-width: 0; }
+.sec-row .sec-secid { font-weight: 600; }
+.sec-row .sec-name {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sec-row button { padding: 3px 8px; font-size: 11px; }
+
+/* ── quick switcher (левая панель, всегда открыт) ── */
+.quick-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px;
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.quick-row:hover { background: var(--bg3); }
+.quick-row .quick-ticker { font-weight: 600; flex: 1; }
+.fav-star-static {
+  color: var(--yellow);
+  width: 12px;
+  text-align: center;
+  font-size: 11px;
+}
+
+/* ── accordion (менеджер тикеров, свёрнут по умолчанию) ── */
+.accordion-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  padding: var(--space-3);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition-fast);
+}
+.accordion-header:hover { background: var(--bg3); filter: none; }
+.accordion-header:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.accordion-arrow {
+  display: inline-block;
+  transition: transform var(--transition-fast);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+.accordion-header.open .accordion-arrow { transform: rotate(90deg); }
+.accordion-body { display: none; }
+.accordion-body.open { display: block; }
+
+/* ── analyzer tool toolbar (Анализ tab — graphics-editor style tool
+   selection: click an icon to open its settings panel below and route
+   chart clicks to it; independent of each tool's own show/hide checkboxes) ── */
+.tool-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+.tool-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-lg);
+  color: var(--text);
+  cursor: pointer;
+  filter: none;
+  opacity: 0.6;
+  transition: opacity var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
+}
+.tool-btn:hover { opacity: 0.9; background: var(--bg3); filter: none; }
+.tool-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tool-btn.active {
+  opacity: 1;
+  border-color: var(--accent);
+  background: var(--bg3);
+  color: var(--accent);
+  filter: none;
+}
+.tool-spacer { flex: 1 1 auto; }
+/* Buttons are rendered into these wrappers from the TOOLS registry
+   (tools.js:renderToolbarButtons — split by surface/group, see surfaceOf())
+   — display:contents makes each transparent to its parent flex row, as if
+   the buttons were direct children (a plain <span> would otherwise become
+   a single flex item containing all of them). */
+#cursor-tool-buttons, #main-tool-buttons, #forecast-tool-buttons, #oscillator-tool-buttons { display: contents; }
+
+/* ── price levels (Основной график tab, cursor tool) ── */
+#price-level-list .field-row { margin-bottom: 3px; }
+#price-level-list .num { color: var(--yellow); }
+
+/* ── «нет данных на текущем интервале» ── */
+.no-data-badge {
+  color: var(--yellow);
+  font-size: 9.5px;
+  font-weight: 400;
+  border: 1px solid var(--yellow);
+  border-radius: 3px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+.quick-row.no-data, .ticker-row.no-data { opacity: 0.65; }
+
+/* ── менеджер задач ── */
+.task-status-current {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+}
+.task-status-current:hover { background: var(--bg3); }
+.task-status-label {
+  font-weight: 600;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-status-queue { color: var(--muted); font-size: 11px; }
+
+.mini-progress {
+  background: var(--bg3);
+  border-radius: 3px;
+  height: 5px;
+  overflow: hidden;
+}
+.mini-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.2s;
+  border-radius: 3px;
+}
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.task-row:last-child { border-bottom: none; }
+.task-row .task-main { flex: 1; min-width: 0; }
+.task-row .task-label {
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-row .mini-progress { margin-top: 3px; }
+
+.status-badge {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  border-radius: 3px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+.status-badge.pending     { color: var(--muted);  border: 1px solid var(--muted); }
+.status-badge.running     { color: var(--accent); border: 1px solid var(--accent); }
+.status-badge.done        { color: var(--green);  border: 1px solid var(--green); }
+.status-badge.error       { color: var(--red);    border: 1px solid var(--red); }
+.status-badge.cancelled   { color: var(--yellow); border: 1px solid var(--yellow); }
+.status-badge.interrupted { color: var(--orange); border: 1px solid var(--orange); }
+
+/* ── пагинация «Мои тикеры» ── */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 8px 0 2px;
+}
+.pager .icon-btn { font-size: 14px; }
+
+.panel-section {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-section h4 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  margin-bottom: var(--space-2);
+  display: flex;
+  align-items: center;
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: 6px;
+}
+.field-row label { color: var(--muted); }
+.field-row input[type="number"],
+.field-row input[type="text"] {
+  width: 90px;
+}
+.checkbox-row { justify-content: flex-start; gap: var(--space-2); }
+.checkbox-row label { color: var(--text); cursor: pointer; }
+
+.hint {
+  display: block;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  margin-top: var(--space-1);
+}
+
+/* ── progress ── */
+#progress-track {
+  background: var(--bg3);
+  border-radius: 3px;
+  height: 6px;
+  margin: 6px 0 4px;
+  overflow: hidden;
+}
+#progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.2s;
+  border-radius: 3px;
+}
+#progress-label { color: var(--muted); font-size: 11px; }
+
+/* ── results ── */
+#results-content { font-size: 12px; }
+
+.result-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+.result-row:last-child { border-bottom: none; }
+.result-key   { color: var(--muted); }
+.result-val   { font-weight: 600; }
+.result-val.up   { color: var(--green); }
+.result-val.down { color: var(--red); }
+
+.cand-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  font-size: 11px;
+}
+.cand-table th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 400;
+  padding: 2px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.cand-table td { padding: 2px 4px; }
+.cand-table tr:hover td { background: var(--bg3); }
+
+/* ── history ── */
+.hist-item {
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  cursor: pointer;
+}
+.hist-item:hover { background: var(--bg3); }
+.hist-item-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+.hist-date  { color: var(--muted); flex: 1; }
+.hist-price { font-weight: 600; }
+.hist-stale { color: var(--yellow); font-size: 10px; }
+.hist-del-btn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 0 2px;
+  cursor: pointer;
+  line-height: 1;
+  border-radius: 2px;
+  font-weight: 400;
+  filter: none;
+}
+.hist-del-btn:hover { color: var(--red); background: none; filter: none; }
+.hist-model-badge {
+  font-size: 9px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+.hist-eye-btn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 0 2px;
+  cursor: pointer;
+  line-height: 1;
+  border-radius: 2px;
+  font-weight: 400;
+  filter: none;
+  opacity: 0.5;
+}
+.hist-eye-btn:hover { opacity: 0.85; background: none; filter: none; }
+.hist-eye-btn.active { opacity: 1; color: var(--yellow); }
+
+/* ── tabs ── */
+#tab-bar, .tab-bar {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.tab-btn {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--muted);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  padding: var(--space-2) var(--space-1);
+  cursor: pointer;
+  white-space: nowrap;
+  filter: none;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.tab-btn:hover { color: var(--text); filter: none; }
+.tab-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  filter: none;
+}
+
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
+
+.muted-val { color: var(--muted); font-size: var(--fs-base); }
+
+/* ── info badge (?) ── */
+.info-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  cursor: default;
+  vertical-align: middle;
+  margin-left: var(--space-1);
+  position: relative;
+  flex-shrink: 0;
+}
+.info-badge::after {
+  content: attr(data-tip);
+  display: none;
+  position: absolute;
+  left: 50%;
+  top: 18px;
+  transform: translateX(-50%);
+  width: 220px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) 10px;
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  color: var(--text);
+  white-space: pre-line;
+  z-index: 200;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  pointer-events: none;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.info-badge:hover::after { display: block; }
+
+/* ── inputs / buttons ──
+   Native controls normalized so the app looks the same regardless of which
+   browser/OS renders it — was previously left to browser defaults (Chrome
+   vs Firefox spinner arrows, OS-themed checkboxes/sliders), the main source
+   of the "topорный" complaint alongside the emoji icons. */
+input[type="text"],
+input[type="number"],
+select {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-md);
+  padding: var(--space-1) 7px;
+  font-size: var(--fs-md);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+input[type="text"]:focus,
+input[type="number"]:focus,
+select:focus,
+input[type="text"]:focus-visible,
+input[type="number"]:focus-visible,
+select:focus-visible { border-color: var(--accent); }
+
+/* Number inputs: keep the field, drop the native spin buttons — the single
+   biggest Chrome/Firefox rendering difference among the form controls, and
+   most numeric fields already pair with a styled range slider anyway. */
+input[type="number"] { -moz-appearance: textfield; }
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* select: custom chevron replacing the native (OS-themed) arrow. */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 26px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238b949e' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+
+/* checkbox: custom box+check, same accent-driven on/off language used
+   everywhere else (tool-btn.active, tab-btn.active, ...) instead of a bare
+   OS-native accent-color box. */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  cursor: pointer;
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: middle;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+input[type="checkbox"]:hover { border-color: var(--accent); }
+input[type="checkbox"]:checked {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='9' viewBox='0 0 11 9'%3E%3Cpath d='M1 4.5l3 3 6-6.5' fill='none' stroke='%230d1117' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+}
+input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: 1px; }
+
+/* range: styled as a fader (the vernacular of an instrument/mixing panel,
+   consistent with the rest of this analytical-tool aesthetic) — thin track,
+   a filled portion up to the handle where the browser supports it
+   (Firefox's ::-moz-range-progress; WebKit has no equivalent so Chrome/
+   Safari show an unfilled track with just the handle), a small rectangular
+   cap rather than a plain circle. */
+input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 16px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 16px;
+  margin-top: -7px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  border: 1px solid #1f6feb;
+  transition: transform var(--transition-fast);
+}
+input[type="range"]:hover::-webkit-slider-thumb { transform: scaleY(1.1); }
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+}
+input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 10px;
+  height: 16px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  border: 1px solid #1f6feb;
+}
+input[type="range"]:focus-visible { outline: none; }
+input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--accent-dim); }
+input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 3px var(--accent-dim); }
+
+button {
+  background: var(--accent);
+  color: #0d1117;
+  border: none;
+  border-radius: var(--radius-md);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  cursor: pointer;
+  /* normal, not nowrap: a button whose text doesn't fit its box (narrow
+     panel, two buttons sharing a flex row, ...) wraps to a second line
+     instead of silently overflowing/getting clipped by an ancestor's
+     overflow:hidden — the actual "button text gets cut off" complaint. Short
+     single-word/icon buttons are unaffected (nothing to wrap at). */
+  white-space: normal;
+  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  transition: filter var(--transition-fast);
+}
+/* Buttons sharing a flex row (e.g. Претест/Калибровать) default to
+   min-width:auto as flex items, which blocks shrinking below their content
+   width even with flex:1 — the other half of the same overflow mechanism. */
+.field-row button { min-width: 0; }
+button:hover { filter: brightness(1.15); }
+button:active { filter: brightness(0.9); }
+button:disabled { opacity: 0.4; cursor: default; filter: none; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.btn-secondary {
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-weight: 400;
+}
+.btn-secondary:hover { border-color: var(--accent); color: var(--accent); }

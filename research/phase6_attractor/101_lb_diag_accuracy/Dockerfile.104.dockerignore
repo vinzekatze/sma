@@ -1,0 +1,15 @@
+# Dockerfile-специфичный ignore (BuildKit): переопределяет общий .dockerignore
+# проекта, который исключает data/ — этому образу нужны кэши свечей 8 тикеров.
+# Действует ТОЛЬКО для сборки по Dockerfile.104.
+
+*
+!research/phase6_attractor/101_lb_diag_accuracy/101_lb_diag_accuracy.py
+!research/phase6_attractor/101_lb_diag_accuracy/104_lb_greedy_select.py
+!data/candles/CHMF/1d.json
+!data/candles/LKOH/1d.json
+!data/candles/MGNT/1d.json
+!data/candles/MRKP/1d.json
+!data/candles/NLMK/1d.json
+!data/candles/NVTK/1d.json
+!data/candles/SBER/1d.json
+!data/candles/VTBR/1d.json

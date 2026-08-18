@@ -1,0 +1,80 @@
+{
+  "origin_ts": "2026-05-17",
+  "cpu_count": 16,
+  "params": {
+    "p_max": 70,
+    "val_horizon": 5,
+    "horizon": 15,
+    "auto_ma": true,
+    "ma_fit_bars": 10,
+    "use_lwr": true,
+    "top_n": 5
+  },
+  "results": [
+    {
+      "workers": 1,
+      "elapsed_s": 78.1,
+      "speedup": 1.0,
+      "ma_window": 438,
+      "hurst": 0.534,
+      "close": 323.72,
+      "top1_p": 35,
+      "top1_pca_k": 14,
+      "top1_mape": 0.1006,
+      "mean_price": 323.13,
+      "std_price": 1.79
+    },
+    {
+      "workers": 2,
+      "elapsed_s": 53.18,
+      "speedup": 1.47,
+      "ma_window": 438,
+      "hurst": 0.534,
+      "close": 323.72,
+      "top1_p": 35,
+      "top1_pca_k": 14,
+      "top1_mape": 0.1006,
+      "mean_price": 323.13,
+      "std_price": 1.79
+    },
+    {
+      "workers": 4,
+      "elapsed_s": 47.87,
+      "speedup": 1.63,
+      "ma_window": 438,
+      "hurst": 0.534,
+      "close": 323.72,
+      "top1_p": 35,
+      "top1_pca_k": 14,
+      "top1_mape": 0.1006,
+      "mean_price": 323.13,
+      "std_price": 1.79
+    },
+    {
+      "workers": 8,
+      "elapsed_s": 71.79,
+      "speedup": 1.09,
+      "ma_window": 438,
+      "hurst": 0.534,
+      "close": 323.72,
+      "top1_p": 35,
+      "top1_pca_k": 14,
+      "top1_mape": 0.1006,
+      "mean_price": 323.13,
+      "std_price": 1.79
+    },
+    {
+      "workers": 16,
+      "elapsed_s": 178.2,
+      "speedup": 0.44,
+      "ma_window": 438,
+      "hurst": 0.534,
+      "close": 323.72,
+      "top1_p": 35,
+      "top1_pca_k": 14,
+      "top1_mape": 0.1006,
+      "mean_price": 323.13,
+      "std_price": 1.79
+    }
+  ]
+}

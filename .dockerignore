@@ -1,0 +1,14 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.venv
+*.db
+*.db-shm
+*.db-wal
+data/
+docs/
+prototype/
+tests/
+.git
+*.md
