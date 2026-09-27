@@ -1,7 +1,8 @@
 import { S } from './state.js';
 import { api } from './api.js';
 import { renderChart } from './chart.js';
-import { registerTool } from './tools.js';
+import { registerTool, isToolObjectVisible } from './tools.js';
+import { getToolShowOnChart, saveToolShowOnChart } from './local_prefs.js';
 
 // ── moving_averages analyzer (Основной график tab) ──────────────────────
 // N configurable moving averages, own type (SMA/EMA/WMA) + period each —
@@ -12,15 +13,22 @@ import { registerTool } from './tools.js';
 // no debounce needed (unlike zigzag_tool's series, which need a real
 // network round trip per edit).
 
-const PALETTE = ['#f0883e', '#a5d6ff', '#d2a8ff', '#7ee787', '#ffa198', '#79c0ff'];
 let _nextSeriesId = 1;
 
 function redraw() {
   renderChart({ preserveRange: true });
 }
 
+// Palette is the "Палитра MA" role of the app-wide color profile
+// (S.colorProfile.ma_palette, docs/plans/frontend_improvements_plan.md
+// §1.1a — settings.js/"Настройки приложения"), read live (not cached) so a
+// profile save recolors existing series immediately. Falls back to a
+// literal default only if the profile is somehow empty (shouldn't happen —
+// state.js/db.py both seed a non-empty default).
 function colorFor(index) {
-  return PALETTE[index % PALETTE.length];
+  const palette = S.colorProfile.ma_palette;
+  if (!palette?.length) return '#f0883e';
+  return palette[index % palette.length];
 }
 
 // ── math (causal — null before `period` closes are available) ──────────
@@ -118,10 +126,34 @@ export function addMovingAverage() {
 // ── settings persist + recompute ─────────────────────────────────────────
 
 export function onMaSettingsChange() {
-  S.maSettings.showOnChart = document.getElementById('ma-show-chart').checked;
   recompute();
   redraw();
   saveMaSettings();
+}
+
+// Eye-icon toggle in the panel header (replaces the old "Показывать на
+// графике" checkbox at the bottom of the panel, project feedback
+// 2026-08-20, §2.6 of docs/plans/frontend_improvements_plan.md) — now means
+// "закреплено": stays visible even while this tool ISN'T the active one
+// (see isMaVisible/buildMaMainTraces below).
+export function toggleMaShowChart() {
+  S.maSettings.showOnChart = !S.maSettings.showOnChart;
+  updateShowChartButton();
+  redraw();
+  saveMaSettings();
+  saveToolShowOnChart('moving_averages', S.maSettings.showOnChart); // global, survives a reload/ticker switch — project feedback 2026-08-20, see local_prefs.js
+}
+
+function updateShowChartButton() {
+  document.getElementById('ma-show-chart-btn')
+    ?.classList.toggle('active', !!S.maSettings.showOnChart);
+}
+
+// Visibility policy (project feedback 2026-08-20, §2.6 of
+// docs/plans/frontend_improvements_plan.md): pinned (showOnChart) OR this
+// tool is the one currently active in the toolbar.
+function isMaVisible() {
+  return isToolObjectVisible('moving_averages', S.maSettings.showOnChart);
 }
 
 function recompute() {
@@ -139,11 +171,11 @@ function recompute() {
 
 function applyMaSettings(p) {
   if (!p) return;
-  document.getElementById('ma-show-chart').checked = !!p.showOnChart;
   S.maSettings = { showOnChart: !!p.showOnChart, series: (p.series || []).map(s => ({ ...s })) };
   const maxId = S.maSettings.series.reduce((m, s) => Math.max(m, s.id), 0);
   _nextSeriesId = maxId + 1;
   renderMaList();
+  updateShowChartButton();
 }
 
 export async function loadMaDefaults() {
@@ -171,15 +203,21 @@ function saveMaSettings() {
 }
 
 // Called once after candles (re)load — recomputes immediately (cheap, no
-// request) so lines are ready the instant showOnChart is on.
+// request) so lines are ready the instant showOnChart is on. showOnChart is
+// then overridden by the global localStorage flag (project feedback
+// 2026-08-20 — see local_prefs.js and trend_ruler.js:initTrendRulerForTicker
+// for the identical reasoning), overriding whatever this ticker's own
+// analysis_settings row had.
 export function initMaForTicker() {
   renderMaList();
   recompute();
+  S.maSettings.showOnChart = getToolShowOnChart('moving_averages', S.maSettings.showOnChart);
+  updateShowChartButton();
 }
 
 // ── registry entry: one line trace per configured MA ─────────────────────
 function buildMaMainTraces() {
-  if (!S.maSettings.showOnChart) return [];
+  if (!isMaVisible()) return [];
   return S.maSettings.series.map((s, i) => {
     const d = S.maData[s.id];
     if (!d) return null;

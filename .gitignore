@@ -14,12 +14,14 @@ __pycache__/
 # Data caches (re-fetchable from MOEX)
 data/
 
-# Research outputs (generated, large — code/README tracked, results/figures not)
-research/**/results/
-research/**/figures/
+# Local Claude Code config / notes (not needed by other contributors)
+.claude/
+INWORK.md
 
 # Misc generated / editor
 .obsidian/
 output60/
+results/
 *.zip
 causality_check.html
+clasters.png

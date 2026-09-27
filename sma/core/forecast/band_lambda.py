@@ -1,15 +1,18 @@
 """
 band_lambda — zigzag event-time forecaster for the uncertainty BAND (not a
-point), with a λ-weighted pool kernel calibrated by band_lambda_calibrator.py.
+point), with a λ-weighted pool kernel. λ is always the uniform-pool zero
+vector in prod — λ-calibration was removed 2026-09-12 (see memory
+project_phase7_calibration_removed_final); the kernel machinery stays
+general (still accepts arbitrary λ) purely because splitting it out again
+would cost more than it'd save.
 
 Ported from research/reference/smap_band_ref.py + band_lambda_calibrator_ref.py
 + smap_band_weighted_ref.py (session 2026-07-08, see
 docs/plans/band_forecast_migration_plan.md sections 1-2 for the full
 methodology writeup and the approved SBER T=20% reference numbers used to
 verify this port). This module holds every *pure* (no I/O) building block —
-zigzag, rank features, pool assembly, live band forecast — shared by both
-this file's own live-forecast entry point and band_lambda_calibrator.py.
-The one async helper (load_raw_ticker_arrays) is DB I/O only, no numpy.
+zigzag, rank features, pool assembly, live band forecast. The one async
+helper (load_raw_ticker_arrays) is DB I/O only, no numpy.
 
 Causality contract (see memory feedback-causality-enforcement): every
 function here operates only on the arrays it's given — there is no
@@ -24,6 +27,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .pivot_time_band import default_step_widths_bars, median_leg_durations_by_direction
+
 # ── constants (docs/plans/band_forecast_migration_plan.md section 1) ─────────
 
 DEFAULT_M = 6
@@ -35,6 +40,7 @@ RANK_WINDOW = 252
 N_BINS = 40
 WINDOW_VOL = 20
 K_LEG = 10
+DEFAULT_STEP_BARS_FALLBACK = 5  # matches sma/ui/chart.js:DEFAULT_STEP_BARS
 
 FEATURE_ORDER = ["volume", "trend", "leg_age", "velocity", "acceleration", "volatility"]
 BAR_FEATURES = ["volume", "trend", "velocity", "acceleration", "volatility"]
@@ -400,8 +406,15 @@ def pool_values_and_weights(
     mask_ticker_data by the caller, this doubles as "as of a past origin").
 
     Returns None or {"origin_date", "origin_extreme_date", "origin_price",
-    "origin_log_price", "origin_direction",
+    "origin_log_price", "origin_direction", "default_step_widths_bars",
     "steps": {1: {"ok", "pool_size", "values", "weights"}, 2: {...}}}.
+
+    default_step_widths_bars ({"step1", "step2"}) — NOT part of the price
+    forecast: a plain causal median (no λ, no pool weighting) of how many
+    bars the target ticker's own past legs of the relevant direction
+    typically took, from pivot_time_band.py. Lets the UI pre-fill each
+    zone's horizontal span with something ticker-specific instead of a
+    fixed constant — still fully overridable by the width sliders.
 
     origin_date is the CONFIRMATION bar — the only causally valid point, and
     what every truncation/lookup in this module keys off. origin_price/
@@ -435,10 +448,17 @@ def pool_values_and_weights(
     origin_direction = int(q_dirs[origin])
     origin_log_price = float(q_lp[origin])
 
+    median_by_dir = median_leg_durations_by_direction(dates_t, q_dates, q_dirs, origin)
+    width1_bars, width2_bars = default_step_widths_bars(
+        median_by_dir, origin_direction, DEFAULT_STEP_BARS_FALLBACK
+    )
+
     result = {
         "origin_date": origin_date, "origin_extreme_date": str(q_extreme[origin]),
         "origin_price": float(np.exp(origin_log_price)),
-        "origin_log_price": origin_log_price, "origin_direction": origin_direction, "steps": {},
+        "origin_log_price": origin_log_price, "origin_direction": origin_direction,
+        "default_step_widths_bars": {"step1": width1_bars, "step2": width2_bars},
+        "steps": {},
     }
     for h in (1, 2):
         feats, ptr, pdir, pranks = build_causal_pool_with_mixed_ranks(
@@ -470,7 +490,7 @@ def forecast_live_band(
 
     Returns None if there aren't enough pivots/pool. Otherwise:
       {"origin_date", "origin_extreme_date", "origin_price", "origin_log_price",
-       "origin_direction", "steps": {1: {...}, 2: {...}}}
+       "origin_direction", "default_step_widths_bars", "steps": {1: {...}, 2: {...}}}
     where steps[h] is either {"ok": False, "pool_size": int} or
     {"ok": True, "pool_size": int, "band_log_return": {q: lr}, "band_price": {q: price},
      "pool_values": [lr, ...], "pool_weights": [w, ...]}.
@@ -499,7 +519,9 @@ def forecast_live_band(
         "origin_date": raw["origin_date"], "origin_extreme_date": raw["origin_extreme_date"],
         "origin_price": raw["origin_price"],
         "origin_log_price": origin_log_price,
-        "origin_direction": raw["origin_direction"], "steps": {},
+        "origin_direction": raw["origin_direction"],
+        "default_step_widths_bars": raw["default_step_widths_bars"],
+        "steps": {},
     }
     for h in (1, 2):
         s = raw["steps"][h]

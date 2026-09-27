@@ -27,7 +27,9 @@ export function setIdle(msg = '', ok = true) {
 }
 
 export function disableControls(on) {
-  ['spectrogram-calculate-btn', 'refresh-current-btn'].forEach(id => {
+  // spectrogram-calculate-btn removed 2026-08-20 (spectrogram now
+  // recomputes reactively, no manual button — see analysis.js).
+  ['refresh-current-btn'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = on;
   });

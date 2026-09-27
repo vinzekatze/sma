@@ -1,21 +1,22 @@
 import { S } from './state.js';
 import { api, setStatus, connectTaskWS } from './api.js';
-import { renderChart, computeGeometryFromWidth, LEVEL_OPTIONS, setOrigin } from './chart.js';
+import { renderChart, computeGeometryFromWidth, LEVEL_OPTIONS, setOrigin, DEFAULT_STEP_BARS } from './chart.js';
 import { refreshTasks } from './tasks.js';
 import { registerModelHandlers, loadAndRenderForecast } from './forecast_history.js';
 import { registerTool } from './tools.js';
 import { iconHtml } from './icons.js';
+import { saveZigzagPinnedTs } from './local_prefs.js';
 
 const MODEL_TYPE = 'band_lambda';
 
 // Wires this model into the unified history/selection system (see
 // forecast_history.js docstring) — when a band_lambda forecast becomes the
-// selected one (marker/history-row click), keep the T-selector and zigzag
-// overlay in sync with it, same as the old loadAndRenderBandForecast did.
+// selected one (marker/history-row click), reflect its T/m/theta back into
+// the spinner/inputs and keep the zigzag overlay in sync with it.
 registerModelHandlers('band_lambda', {
   async onSelected(f) {
-    S.selectedTs = f.params.t_query;
-    S.activeSettingsId = f.params.forecast_settings_id;
+    applyBandLambdaParams(f.params);
+    syncBandWidthSliders(f);
     await loadZigzag();
     updateForecastButtonLabel();
   },
@@ -33,7 +34,7 @@ registerTool({
   surface: 'main',
   group: 'forecaster',
   icon: 'band',
-  label: 'band_lambda — полоса неопределённости',
+  label: 'Band Lambda — полоса неопределённости',
   panelId: 'tool-panel-band_lambda',
   onOriginClick(ts) {
     setOrigin(ts);
@@ -41,142 +42,153 @@ registerTool({
   },
 });
 
-// ── forecast_settings / T-selector ──────────────────────────────────────────
+// ── band_lambda params (T/m/theta — free live parameters, see state.js) ────
+// No more per-T saved rows (λ-calibration removed 2026-09-12, see memory
+// project_phase7_calibration_removed_final) — T is a plain spinner, m/theta
+// plain inputs; all three persist only via forecast_defaults (last-used,
+// same mechanism simplex_ensemble already uses), not a settings table.
 
-export async function loadForecastSettings() {
+function applyBandLambdaParams(p) {
+  S.selectedTs = p.t_query;
+  S.bandLambdaModelParams = { m: p.m, theta: p.theta };
+  const tInput = document.getElementById('bl-t-input');
+  if (tInput) tInput.value = Math.round(p.t_query * 100);
+  const mInput = document.getElementById('bl-calib-m');
+  if (mInput) mInput.value = p.m;
+  const thetaInput = document.getElementById('bl-calib-theta');
+  if (thetaInput) thetaInput.value = p.theta;
+  updateZigzagPinButton();
+}
+
+// Last-used T/m/theta for this (instrument, interval) — falls back to
+// whatever's currently in S.bandLambdaModelParams/S.selectedTs (itself
+// initialized from the hardcoded state.js defaults) when nothing is saved
+// yet, same pattern simplex_ensemble.js:loadSimplexDefaults uses.
+export async function loadBandLambdaDefaults() {
   if (!S.instrumentId) return;
+  let params = { t_query: S.selectedTs, ...S.bandLambdaModelParams };
   try {
-    S.forecastSettingsList = await api(
-      'GET', `/forecast-settings?instrument_id=${S.instrumentId}&interval=${S.interval}&model_type=${MODEL_TYPE}`
+    const res = await api(
+      'GET', `/forecast-settings/defaults?instrument_id=${S.instrumentId}&interval=${S.interval}&model_type=${MODEL_TYPE}`
     );
-  } catch (_) {
-    S.forecastSettingsList = [];
-  }
-  const byT = new Map();
-  for (const s of S.forecastSettingsList) {
-    if (!byT.has(s.t_query)) byT.set(s.t_query, []);
-    byT.get(s.t_query).push(s);
-  }
-  S.calibratedTs = [...byT.keys()].sort((a, b) => a - b);
-  if (S.selectedTs == null || !S.calibratedTs.includes(S.selectedTs)) {
-    S.selectedTs = S.calibratedTs.at(-1) ?? null;
-  }
-  renderTSelector(byT);
-  renderSettingsList();
-  updateForecastButtonLabel();
+    if (res.params) params = res.params;
+  } catch (_) { /* fall back to current/hardcoded defaults */ }
+  applyBandLambdaParams(params);
+  await loadBandLambdaPool();
   await loadZigzag();
 }
 
-function renderTSelector(byT) {
-  const box = document.getElementById('bl-t-selector');
-  const variantsBox = document.getElementById('bl-t-pool-variants');
-  const btn = document.getElementById('bl-forecast-btn');
+// ── pool summary (sidebar "Пул" section — full editing lives in the modal,
+// band_pool_modal.js) ───────────────────────────────────────────────────────
 
-  if (!S.calibratedTs.length) {
-    box.innerHTML = '<span class="muted-val">Нет калибровок — откройте «Калибровка» ниже</span>';
-    variantsBox.innerHTML = '';
-    btn.disabled = true;
-    S.activeSettingsId = null;
-    return;
+export async function loadBandLambdaPool() {
+  if (!S.instrumentId) { S.bandLambdaPool = null; renderPoolSummary(); return; }
+  try {
+    const res = await api(
+      'GET', `/forecast-settings/pool?instrument_id=${S.instrumentId}&interval=${S.interval}&model_type=${MODEL_TYPE}`
+    );
+    S.bandLambdaPool = res.pool;
+  } catch (_) {
+    S.bandLambdaPool = null;
   }
-
-  box.innerHTML = '';
-  const row = document.createElement('div');
-  row.className = 'field-row';
-  const select = document.createElement('select');
-  select.style.flex = '1';
-  S.calibratedTs.forEach(t => {
-    const opt = document.createElement('option');
-    opt.value = t;
-    opt.textContent = `${(t * 100).toFixed(0)}%`;
-    if (t === S.selectedTs) opt.selected = true;
-    select.appendChild(opt);
-  });
-  select.onchange = () => {
-    S.selectedTs = +select.value;
-    onSelectedTChange(byT); // reloads zigzag for the new T, which updates the button label itself
-  };
-  row.appendChild(select);
-  box.appendChild(row);
-
-  onSelectedTChange(byT);
-  btn.disabled = false;
+  renderPoolSummary();
 }
 
-function onSelectedTChange(byT) {
-  const variants = (byT.get(S.selectedTs) || []).sort((a, b) => b.is_active - a.is_active);
-  const active = variants.find(v => v.is_active) || variants[0];
-  S.activeSettingsId = active?.id ?? null;
+export function renderPoolSummary() {
+  const box = document.getElementById('bl-pool-summary');
+  if (!box) return;
+  box.innerHTML = S.bandLambdaPool
+    ? `${S.bandLambdaPool.resolved_tickers.length} тикеров <span class="ticker-badge">${S.bandLambdaPool.pool_key}</span>`
+    : '<span class="muted-val">не настроен</span>';
+}
 
-  const variantsBox = document.getElementById('bl-t-pool-variants');
-  if (variants.length <= 1) {
-    variantsBox.innerHTML = '';
-  } else {
-    variantsBox.innerHTML = `<small class="hint">${variants.length} варианта пула для этого T:</small>`;
-    variants.forEach(v => {
-      const row = document.createElement('div');
-      row.className = 'field-row';
-      const label = v.pool_key + (v.calibration_meta?.pinball_rel != null
-        ? ` (pinball ${v.calibration_meta.pinball_rel.toFixed(3)})` : '');
-      row.innerHTML = `
-        <label style="${v.is_active ? 'color:var(--text);font-weight:600' : ''}">${label}</label>
-        ${v.is_active ? '<span class="muted-val">активен</span>' : `<button class="icon-btn" title="Сделать активным">${iconHtml('check')}</button>`}
-      `;
-      if (!v.is_active) {
-        row.querySelector('button').onclick = () => activateSettings(v.id);
-      }
-      variantsBox.appendChild(row);
-    });
-  }
-
+// T input onchange (index.html) — reloads the zigzag overlay for the new T,
+// which updates the forecast button label itself; no persistence here (only
+// a completed forecast writes forecast_defaults, see task_manager.py:
+// _run_forecast_band_lambda).
+export function onBandTChange() {
+  const input = document.getElementById('bl-t-input');
+  const pct = +input.value;
+  if (!pct || pct <= 0) return;
+  S.selectedTs = pct / 100;
+  updateZigzagPinButton();
   loadZigzag();
 }
 
-export async function activateSettings(id) {
-  try {
-    await api('POST', `/forecast-settings/${id}/activate`);
-    await loadForecastSettings();
-  } catch (e) {
-    setStatus(e.message, 'err');
-  }
+// m/theta inputs onchange (index.html) — no zigzag/chart effect (only T
+// does), just keeps S.bandLambdaModelParams in sync with what's actually
+// typed so submitForecast reads the current values, not stale ones.
+export function onBandModelParamsChange() {
+  S.bandLambdaModelParams = {
+    m: +document.getElementById('bl-calib-m').value,
+    theta: +document.getElementById('bl-calib-theta').value,
+  };
 }
 
-function renderSettingsList() {
-  const box = document.getElementById('bl-settings-list');
-  if (!S.forecastSettingsList.length) {
-    box.innerHTML = '<span class="muted-val">—</span>';
+function updateZigzagPinButton() {
+  document.getElementById('bl-zigzag-pin-btn')
+    ?.classList.toggle('active', S.zigzagPinnedTs.has(S.selectedTs));
+}
+
+// Pins/unpins the CURRENTLY selected T (S.selectedTs) — reuses whatever's
+// already in S.zigzagPivots (already fetched for this T by loadZigzag) as
+// the pinned cache instead of a second network round trip; the data is
+// identical either way (same endpoint/params), so copying it is just as
+// correct and free. See buildForecastZigzagTraces (chart.js) for how a
+// pinned-but-not-selected T's data gets drawn from this cache once the
+// selector moves to a different T.
+export function toggleZigzagPin() {
+  const t = S.selectedTs;
+  if (t == null) return;
+  if (S.zigzagPinnedTs.has(t)) {
+    S.zigzagPinnedTs.delete(t);
+    delete S.zigzagPinnedData[t];
+  } else {
+    S.zigzagPinnedTs.add(t);
+    S.zigzagPinnedData[t] = S.zigzagPivots;
+  }
+  updateZigzagPinButton();
+  renderZigzagPinnedList();
+  saveZigzagPinnedTs(S.zigzagPinnedTs);
+  redraw();
+}
+
+function unpinZigzagT(t) {
+  S.zigzagPinnedTs.delete(t);
+  delete S.zigzagPinnedData[t];
+  updateZigzagPinButton();
+  renderZigzagPinnedList();
+  saveZigzagPinnedTs(S.zigzagPinnedTs);
+  redraw();
+}
+
+function renderZigzagPinnedList() {
+  const box = document.getElementById('bl-zigzag-pinned-list');
+  if (!box) return;
+  if (!S.zigzagPinnedTs.size) {
+    box.innerHTML = '';
     return;
   }
-  box.innerHTML = '';
-  [...S.forecastSettingsList].sort((a, b) => a.t_query - b.t_query).forEach(s => {
-    const row = document.createElement('div');
-    row.className = 'ticker-row';
-    const rel = s.calibration_meta?.pinball_rel;
-    row.innerHTML = `
-      <div class="ticker-main">
-        <div class="ticker-name">
-          T=${(s.t_query * 100).toFixed(0)}% <span class="ticker-badge">${s.pool_key}</span>
-          ${s.is_active ? '<span class="ticker-badge">активен</span>' : ''}
-        </div>
-        <div class="coverage-line">
-          ${rel != null ? `pinball_rel=${rel.toFixed(3)}` : 'без метрики'} · min_bars=${s.min_bars} · m=${s.m} · θ=${s.theta}
-        </div>
-      </div>
-      <button class="icon-btn danger" title="Удалить">${iconHtml('close')}</button>
-    `;
-    row.querySelector('button').onclick = () => removeSettings(s.id);
-    box.appendChild(row);
+  box.innerHTML = [...S.zigzagPinnedTs].sort((a, b) => a - b).map(t => `
+    <span class="zigzag-pin-chip">
+      T=${(t * 100).toFixed(0)}%
+      <button class="icon-btn danger" title="Снять закрепление" data-unpin-t="${t}" style="padding:0">${iconHtml('close')}</button>
+    </span>
+  `).join('');
+  box.querySelectorAll('[data-unpin-t]').forEach(btn => {
+    btn.onclick = () => unpinZigzagT(+btn.dataset.unpinT);
   });
 }
 
-async function removeSettings(id) {
-  if (!confirm('Удалить эту калибровку?')) return;
-  try {
-    await api('DELETE', `/forecast-settings/${id}`);
-    await loadForecastSettings();
-  } catch (e) {
-    setStatus(e.message, 'err');
-  }
+// Called on ticker switch (app.js:loadCandles) — the pinned T's pivot cache
+// is tied to the previous instrument's price/date scale, meaningless (and
+// actively misleading if drawn) once the chart switches to a different one.
+export function resetZigzagPins() {
+  S.zigzagPinnedTs.clear();
+  S.zigzagPinnedData = {};
+  updateZigzagPinButton();
+  renderZigzagPinnedList();
+  saveZigzagPinnedTs(S.zigzagPinnedTs);
 }
 
 // ── zigzag overlay ────────────────────────────────────────────────────────
@@ -188,23 +200,28 @@ async function removeSettings(id) {
 // "выбран 20%, он прогнозирует в 10% по клику").
 let _zigzagRequestToken = 0;
 
+// Fetches unconditionally whenever a T is selected — no manual "показать
+// зигзаг" toggle any more (project feedback 2026-08-18: "Своя кнопка
+// «показать зиг-заг на графике» не нужна"; §2.4 of docs/plans/
+// frontend_improvements_plan.md). Chart VISIBILITY is a separate concern
+// handled entirely by chart.js:buildForecastZigzagTraces (active tool ∪
+// pinned T's) — this function's only job is keeping S.zigzagPivots (and, if
+// this T happens to be pinned, its S.zigzagPinnedData entry) up to date.
 export async function loadZigzag() {
   const token = ++_zigzagRequestToken;
-  const enabled = document.getElementById('bl-show-zigzag')?.checked;
-  if (!S.instrumentId || S.selectedTs == null || !enabled) {
+  if (!S.instrumentId || S.selectedTs == null) {
     if (token !== _zigzagRequestToken) return;
     S.zigzagPivots = [];
     redraw();
     return;
   }
-  const settings = S.forecastSettingsList.find(s => s.id === S.activeSettingsId);
-  const minBars = settings?.min_bars ?? 5;
   let pivots = [];
   try {
+    // min_bars omitted — server default (bl.DEFAULT_MIN_BARS) applies; it's
+    // no longer a saved per-T value (λ-calibration removed 2026-09-12).
     const res = await api(
       'GET',
-      `/forecasts/zigzag?instrument_id=${S.instrumentId}&interval=${S.interval}` +
-      `&t_query=${S.selectedTs}&min_bars=${minBars}`
+      `/forecasts/zigzag?instrument_id=${S.instrumentId}&interval=${S.interval}&t_query=${S.selectedTs}`
     );
     pivots = res.pivots || [];
   } catch (_) {
@@ -212,12 +229,9 @@ export async function loadZigzag() {
   }
   if (token !== _zigzagRequestToken) return; // superseded by a newer request — discard
   S.zigzagPivots = pivots;
+  if (S.zigzagPinnedTs.has(S.selectedTs)) S.zigzagPinnedData[S.selectedTs] = pivots; // keep a pinned T's cache fresh, not just its first snapshot
   updateForecastButtonLabel();
   redraw();
-}
-
-export function toggleZigzagDisplay() {
-  loadZigzag();
 }
 
 function redraw() {
@@ -273,7 +287,7 @@ export function updateForecastButtonLabel() {
 
 export async function submitForecast() {
   if (!S.instrumentId) { setStatus('Сначала загрузите свечи', 'err'); return; }
-  if (!S.activeSettingsId) { setStatus('Сначала откалибруйте этот T', 'err'); return; }
+  if (S.selectedTs == null) { setStatus('Укажите T (порог зигзага)', 'err'); return; }
 
   let originCandleId = null;
   const pivot = findOriginPivot();
@@ -290,7 +304,7 @@ export async function submitForecast() {
     const body = {
       instrument_id: S.instrumentId, interval: S.interval,
       model_type: MODEL_TYPE, t_query: S.selectedTs,
-      forecast_settings_id: S.activeSettingsId,
+      m: S.bandLambdaModelParams.m, theta: S.bandLambdaModelParams.theta,
     };
     if (originCandleId != null) body.origin_candle_id = originCandleId;
     const task = await api('POST', '/forecasts', body);
@@ -318,166 +332,19 @@ export async function submitForecast() {
   }
 }
 
-// ── calibration targets (dynamic rows) ──────────────────────────────────────
-
-let _targetRowId = 0;
-
-export function addCalibTargetRow(tQuery = 0.20, minBars = 5) {
-  const list = document.getElementById('bl-calib-targets-list');
-  const id = `calib-target-${_targetRowId++}`;
-  const row = document.createElement('div');
-  row.className = 'field-row';
-  row.id = id;
-  row.innerHTML = `
-    <label>T (%)</label>
-    <input type="number" class="ct-t" value="${(tQuery * 100).toFixed(0)}" min="1" max="60" step="1" style="width:55px">
-    <label>min_bars</label>
-    <input type="number" class="ct-minbars" value="${minBars}" min="0" max="100" style="width:50px">
-    <button class="icon-btn danger" title="Убрать">${iconHtml('close')}</button>
-  `;
-  row.querySelector('button').onclick = () => row.remove();
-  list.appendChild(row);
-}
-
-function readCalibTargets() {
-  return [...document.querySelectorAll('#bl-calib-targets-list .field-row')].map(row => ({
-    t_query: +row.querySelector('.ct-t').value / 100,
-    min_bars: +row.querySelector('.ct-minbars').value,
-  }));
-}
-
-function readPoolSpec() {
-  const categories = [...document.querySelectorAll('.bl-pool-cat:checked')].map(el => el.value);
-  const n = +document.getElementById('bl-pool-n').value;
-  return { categories, n };
-}
-
-export async function runCalibration() {
-  if (!S.instrumentId) { setStatus('Сначала загрузите свечи', 'err'); return; }
-  const pool = readPoolSpec();
-  if (!pool.categories.length) { setStatus('Выберите хотя бы одну категорию пула', 'err'); return; }
-  const targets = readCalibTargets();
-  if (!targets.length) { setStatus('Добавьте хотя бы один T', 'err'); return; }
-
-  const btn = document.getElementById('bl-calibrate-btn');
-  btn.disabled = true;
-  setStatus('Резолвинг пула…', 'busy');
-  try {
-    const task = await api('POST', '/forecast-settings/calibrate', {
-      instrument_id: S.instrumentId, interval: S.interval, model_type: MODEL_TYPE,
-      targets, m: +document.getElementById('bl-calib-m').value,
-      theta: +document.getElementById('bl-calib-theta').value,
-      pool,
-    });
-    setStatus(`Калибровка #${task.task_id} поставлена в очередь`, 'ok');
-    refreshTasks();
-    connectTaskWS(task.task_id, msg => {
-      if (msg.status === 'running' && msg.total > 0) {
-        setStatus(`Калибровка — ${msg.done}/${msg.total} T…`, 'busy');
-      }
-      if (msg.status === 'done') {
-        setStatus('Калибровка завершена', 'ok');
-        btn.disabled = false;
-        loadForecastSettings();
-      }
-      if (msg.status === 'error') {
-        setStatus(`Ошибка калибровки: ${msg.error}`, 'err');
-        btn.disabled = false;
-      }
-      if (msg.status === 'cancelled') {
-        setStatus('Калибровка отменена', 'err');
-        btn.disabled = false;
-      }
-      refreshTasks();
-    });
-  } catch (e) {
-    btn.disabled = false;
-    setStatus(e.message, 'err');
-  }
-}
-
-export async function runPretest() {
-  if (!S.instrumentId) { setStatus('Сначала загрузите свечи', 'err'); return; }
-  const pool = readPoolSpec();
-  if (!pool.categories.length) { setStatus('Выберите хотя бы одну категорию пула', 'err'); return; }
-  const targets = readCalibTargets();
-  const tQuery = targets[0]?.t_query ?? 0.20;
-  const minBars = targets[0]?.min_bars ?? 5;
-
-  const resultBox = document.getElementById('bl-pretest-result');
-  resultBox.innerHTML = '<span class="muted-val">Уровень 1 (быстрый, без скачивания)…</span>';
-  try {
-    const task = await api('POST', '/forecast-settings/pretest', {
-      instrument_id: S.instrumentId, interval: S.interval,
-      pool, t_query: tQuery, min_bars: minBars, level: 1,
-    });
-    refreshTasks();
-    connectTaskWS(task.task_id, msg => {
-      if (msg.status === 'done') renderPretestSummary(msg.summary);
-      if (msg.status === 'error') resultBox.innerHTML = `<span class="muted-val">${msg.error}</span>`;
-      refreshTasks();
-    });
-  } catch (e) {
-    resultBox.innerHTML = `<span class="muted-val">${e.message}</span>`;
-  }
-}
-
-function renderPretestSummary(summary) {
-  const box = document.getElementById('bl-pretest-result');
-  if (summary.level === 1) {
-    box.innerHTML = `
-      <div class="result-row"><span class="result-key">Кандидатов</span><span class="result-val">${summary.n_candidates}</span></div>
-      <div class="result-row"><span class="result-key">С историей</span><span class="result-val">${summary.n_resolved}</span></div>
-      <div class="result-row"><span class="result-key">Лет истории (сумм./сред.)</span><span class="result-val">${summary.total_years} / ${summary.avg_years}</span></div>
-      <button style="width:100%;margin-top:6px" onclick="runPretestLevel2()">Точнее (уровень 2, со скачиванием)</button>
-    `;
-  } else {
-    box.innerHTML = `
-      <div class="result-row"><span class="result-key">Тикеров</span><span class="result-val">${summary.n_tickers}</span></div>
-      <div class="result-row"><span class="result-key">Событий (сумм./сред.)</span><span class="result-val">${summary.total_events} / ${summary.avg_events}</span></div>
-    `;
-  }
-}
-
-export async function runPretestLevel2() {
-  const pool = readPoolSpec();
-  const targets = readCalibTargets();
-  const tQuery = targets[0]?.t_query ?? 0.20;
-  const minBars = targets[0]?.min_bars ?? 5;
-  const box = document.getElementById('bl-pretest-result');
-  box.innerHTML = '<span class="muted-val">Уровень 2 (загрузка + подсчёт событий)…</span>';
-  try {
-    const task = await api('POST', '/forecast-settings/pretest', {
-      instrument_id: S.instrumentId, interval: S.interval,
-      pool, t_query: tQuery, min_bars: minBars, level: 2,
-    });
-    refreshTasks();
-    connectTaskWS(task.task_id, msg => {
-      if (msg.status === 'running' && msg.total > 0) {
-        box.innerHTML = `<span class="muted-val">Загрузка данных пула — ${msg.done}/${msg.total}…</span>`;
-      }
-      if (msg.status === 'done') renderPretestSummary(msg.summary);
-      if (msg.status === 'error') box.innerHTML = `<span class="muted-val">${msg.error}</span>`;
-      refreshTasks();
-    });
-  } catch (e) {
-    box.innerHTML = `<span class="muted-val">${e.message}</span>`;
-  }
-}
-
-// ── display settings: levels (checkboxes), opacity, width, presets ─────────
-// Levels/opacity match prototype/forcaster/ui/app9.py exactly (LEVEL_OPTIONS
-// checkboxes, fixed per-level opacity — see chart.js:buildBandZoneShapes).
-// Width has no prototype equivalent — replaces an unreliable drag-to-resize
-// attempt (project feedback 2026-08-07); it is NOT part of a display_preset
-// (those only ever held levels/opacity) — it edits the current forecast's
-// zone_geometry, same persistence path a drag would have used.
+// ── display settings: levels (checkboxes), уровень доверия, opacity, width,
+// presets ────────────────────────────────────────────────────────────────
+// Levels/opacity/trade-level/toggles persist together as one display_preset
+// (see chart.js:buildBandZoneShapes for how they're consumed). Width has no
+// preset equivalent — it edits the current forecast's zone_geometry, same
+// persistence path a drag would have used.
 
 export function renderLevelCheckboxes() {
   const box = document.getElementById('bl-display-levels-box');
   if (!box) return;
   box.innerHTML = LEVEL_OPTIONS.map(lvl => `
-    <label style="margin-right:10px"><input type="checkbox" class='bl-display-level' value="${lvl}"
+    <label><input type="checkbox" class='bl-display-level' value="${lvl}"
+      onchange="applyDisplaySettings()"
       ${S.displayPreset.levels.includes(lvl) ? 'checked' : ''}> ${lvl}%</label>
   `).join('');
 }
@@ -493,46 +360,63 @@ function setDisplayLevelCheckboxes(levels) {
 }
 
 // Single named preset ("__default__") — no picker, no per-name save prompt.
-// "Применить" both updates the current display AND persists these settings
-// as the one default, auto-loaded next time (project feedback 2026-08-08:
-// "пускай будет один дефолтный пресет по сути, настройки которого
-// сохраняются кнопкой применить"). Ширина шага (applyBandWidth) is
-// intentionally NOT part of this — it stays per-forecast (zone_geometry).
+// Applies immediately (levels/opacity checkbox+slider call this directly on
+// change/input, see index.html) and persists it as the one default,
+// auto-loaded next time — a separate "Применить" button used to gate both of
+// these on an explicit click, but that read as redundant once every other
+// display setting in the app applies live (project feedback 2026-08-19,
+// §2.5 of docs/plans/frontend_improvements_plan.md). The render itself stays
+// synchronous/instant; only the persistence POST is debounced (same
+// fire-and-forget 500ms pattern analysis_settings already uses, see
+// docs/plans/trend_variance_analyzer_migration_plan.md §3.1) so dragging the
+// opacity slider doesn't fire a request per animation frame.
 const DISPLAY_PRESET_NAME = '__default__';
+let _displayPresetSaveTimer = null;
 
-export async function applyDisplaySettings() {
+export function applyDisplaySettings() {
   const levels = readDisplayLevels();
   const opacity = +document.getElementById('bl-display-opacity').value;
   if (!levels.length) { setStatus('Включите хотя бы один уровень', 'err'); return; }
-  S.displayPreset = { levels, opacity };
+  const tradeLevelPct = +document.getElementById('bl-trade-level-pct').value;
+  const showZones = document.getElementById('bl-show-zones').checked;
+  const showTradeLevel = document.getElementById('bl-show-trade-level').checked;
+  const trimZone1 = document.getElementById('bl-trim-zone1').checked;
+  S.displayPreset = { levels, opacity, tradeLevelPct, showZones, showTradeLevel, trimZone1 };
   renderChart({ preserveRange: true });
-  try {
-    await api('POST', '/display-presets', {
-      model_type: MODEL_TYPE, name: DISPLAY_PRESET_NAME,
-      levels, opacity, is_default: true,
-    });
-    setStatus('Настройки отображения сохранены', 'ok');
-  } catch (e) {
-    setStatus(e.message, 'err');
-  }
+
+  clearTimeout(_displayPresetSaveTimer);
+  _displayPresetSaveTimer = setTimeout(async () => {
+    try {
+      await api('POST', '/display-presets', {
+        model_type: MODEL_TYPE, name: DISPLAY_PRESET_NAME,
+        levels, opacity, is_default: true,
+        trade_level_pct: tradeLevelPct, show_zones: showZones,
+        show_trade_level: showTradeLevel, trim_zone1: trimZone1,
+      });
+    } catch (e) {
+      setStatus(e.message, 'err');
+    }
+  }, 500);
 }
 
 let _geometrySaveTimer = null;
 
 // Only meaningful while the currently SELECTED forecast (S.selectedForecastId)
 // is a band_lambda one — see S.renderedForecasts (state.js) for the shared
-// cache this reads/writes zone_geometry on.
+// cache this reads/writes zone_geometry on. Two independent sliders (project
+// feedback 2026-08-26: up/down leg durations are asymmetric enough that one
+// shared "Ширина шага" no longer makes sense) — each reads BOTH current
+// slider values so either one can be dragged without resetting the other.
 export function applyBandWidth() {
-  const widthBars = +document.getElementById('bl-band-width-slider').value;
-  S.bandWidthBars = widthBars;
-  const label = document.getElementById('bl-band-width-label');
-  if (label) label.textContent = `${widthBars} бар.`;
+  const width1Bars = +document.getElementById('bl-band-width1-slider').value;
+  const width2Bars = +document.getElementById('bl-band-width2-slider').value;
+  setBandWidthLabels(width1Bars, width2Bars);
 
   const id = S.selectedForecastId;
   const entry = id != null ? S.renderedForecasts.get(id) : null;
   if (!entry || entry.model_type !== 'band_lambda') return;
 
-  const geometry = computeGeometryFromWidth(entry.result.origin_extreme_date, S.interval, widthBars);
+  const geometry = computeGeometryFromWidth(entry.result.origin_extreme_date, S.interval, width1Bars, width2Bars);
   entry.zone_geometry = geometry;
   renderChart({ preserveRange: true });
   clearTimeout(_geometrySaveTimer);
@@ -541,15 +425,49 @@ export function applyBandWidth() {
   }, 500);
 }
 
+function setBandWidthLabels(width1Bars, width2Bars) {
+  const l1 = document.getElementById('bl-band-width1-label');
+  const l2 = document.getElementById('bl-band-width2-label');
+  if (l1) l1.textContent = `${width1Bars} бар.`;
+  if (l2) l2.textContent = `${width2Bars} бар.`;
+}
+
+// Restores the two width sliders to whatever the just-selected forecast
+// actually carries — the persisted zone_geometry's own width1_bars/
+// width2_bars if the user (or a past auto-default) already set one,
+// otherwise the ticker-specific auto-default from
+// result.default_step_widths_bars, otherwise the fixed fallback. Called
+// from band_lambda's onSelected handler below; without this the sliders
+// kept showing whatever the PREVIOUSLY selected forecast left them at.
+function syncBandWidthSliders(f) {
+  const geo = f.zone_geometry;
+  const defaults = f.result.default_step_widths_bars;
+  const width1Bars = geo?.width1_bars ?? defaults?.step1 ?? DEFAULT_STEP_BARS;
+  const width2Bars = geo?.width2_bars ?? defaults?.step2 ?? DEFAULT_STEP_BARS;
+  const s1 = document.getElementById('bl-band-width1-slider');
+  const s2 = document.getElementById('bl-band-width2-slider');
+  if (s1) s1.value = width1Bars;
+  if (s2) s2.value = width2Bars;
+  setBandWidthLabels(width1Bars, width2Bars);
+}
+
 export async function loadDisplayPresets() {
   renderLevelCheckboxes();
   try {
     const presets = await api('GET', `/display-presets?model_type=${MODEL_TYPE}`);
     const def = presets.find(p => p.name === DISPLAY_PRESET_NAME) ?? presets.find(p => p.is_default);
     if (def) {
-      S.displayPreset = { levels: def.levels, opacity: def.opacity };
+      S.displayPreset = {
+        levels: def.levels, opacity: def.opacity,
+        tradeLevelPct: def.trade_level_pct, showZones: def.show_zones,
+        showTradeLevel: def.show_trade_level, trimZone1: def.trim_zone1,
+      };
       setDisplayLevelCheckboxes(def.levels);
       document.getElementById('bl-display-opacity').value = def.opacity;
+      document.getElementById('bl-trade-level-pct').value = def.trade_level_pct;
+      document.getElementById('bl-show-zones').checked = def.show_zones;
+      document.getElementById('bl-show-trade-level').checked = def.show_trade_level;
+      document.getElementById('bl-trim-zone1').checked = def.trim_zone1;
     }
   } catch (_) { /* non-fatal — falls back to the hardcoded UI defaults */ }
 }

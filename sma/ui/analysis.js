@@ -1,18 +1,25 @@
 import { S } from './state.js';
-import { api, setBusy, setIdle, setStatus } from './api.js';
+import { api, setBusy, setIdle } from './api.js';
 import { renderChart } from './chart.js';
-import { registerTool, claimSubpanel, releaseSubpanel } from './tools.js';
+import { registerTool, activateTool } from './tools.js';
+import { hexToRgba } from './color_utils.js';
 
 // ── Анализ tab: spectrogram analyzer ────────────────────────────────────
-// See sma/core/analysis/spectrogram.py. Settings live here; "Рассчитать"
-// fetches once and shows the result in the shared oscillator panel
-// (S.subpanel, claimed via claimSubpanel — see tools.js). Purely visual
-// tweaks (contrast percentile, log-Y) recompute client-side from the
-// already-fetched data — no new request, same pattern as band_lambda's zone
-// levels (sma/ui/chart.js:weightedQuantile). Registered into the shared
-// analyzer registry at the bottom of this file — chart.js finds this
-// analyzer's trace/shape builders generically through that registry, not by
-// importing this module.
+// See sma/core/analysis/spectrogram.py. Settings live here; recomputes
+// reactively on every parameter change (depth/nperseg/overlap/fmin/fmax),
+// debounced — no manual "Рассчитать" button any more (project feedback
+// 2026-08-20: "можно тоже расчитывать автоматом... вроде она не даёт
+// значимой нагрузки" — an earlier round had deliberately kept a manual step
+// here citing cost, revised once the user confirmed it isn't actually
+// heavy). onSelected (tools.js) triggers an initial calc the first time
+// this tool is picked and no data exists yet, same pattern
+// variance_oscillator.js already uses. Purely visual tweaks (contrast
+// percentile, log-Y) still recompute client-side from the already-fetched
+// data — no new request, same pattern as band_lambda's zone levels
+// (sma/ui/chart.js:weightedQuantile). Registered into the shared analyzer
+// registry at the bottom of this file — chart.js finds this analyzer's
+// trace/shape builders generically through that registry, not by importing
+// this module.
 
 function redraw() {
   renderChart({ preserveRange: true });
@@ -77,12 +84,10 @@ function saveSpectrogramSettings() {
 }
 
 export async function calculateSpectrogram() {
-  if (!S.ticker) { setStatus('Сначала загрузите свечи', 'err'); return; }
+  if (!S.ticker) return; // no toast here any more — this can now fire from a reactive settings change, not just an explicit user click
   const settings = readSpectrogramSettings();
   S.spectrogramSettings = settings;
 
-  const btn = document.getElementById('spectrogram-calculate-btn');
-  btn.disabled = true;
   setBusy('Расчёт спектрограммы…');
   try {
     const res = await api('POST', '/series/spectrogram', {
@@ -91,8 +96,7 @@ export async function calculateSpectrogram() {
       overlap_pct: settings.overlapPct, fmin: settings.fmin, fmax: settings.fmax,
     });
     S.spectrogramData = res;
-    if (document.getElementById('spectrogram-show').checked) claimSubpanel('spectrogram');
-    else releaseSubpanel('spectrogram');
+    activateTool('spectrogram'); // freshly calculated result should be visible without a separate toolbar click
 
     const m = res.meta;
     document.getElementById('spectrogram-meta').textContent =
@@ -104,9 +108,26 @@ export async function calculateSpectrogram() {
     setIdle('Спектрограмма рассчитана');
   } catch (e) {
     setIdle(e.message, false);
-  } finally {
-    btn.disabled = false;
   }
+}
+
+// Debounced wrapper for the "expensive" (backend STFT) parameters —
+// depth/nperseg/overlap/fmin/fmax — bound to their own oninput/onchange in
+// index.html. contrast/logY stay on the separate, undebounced
+// applySpectrogramContrast (pure client-side, no request to coalesce).
+let _spectrogramCalcTimer = null;
+
+export function onSpectrogramSettingsChange() {
+  clearTimeout(_spectrogramCalcTimer);
+  _spectrogramCalcTimer = setTimeout(calculateSpectrogram, 500);
+}
+
+// Called when this tool becomes the active oscillator (tools.js:selectTool/
+// activateTool's onSelected hook, same pattern as variance_oscillator.js) —
+// computes only if there's no data yet; re-selecting an already-computed
+// spectrogram is free.
+function onSpectrogramSelected() {
+  if (!S.spectrogramData) calculateSpectrogram();
 }
 
 // Percentile clip for the heatmap color range + log-Y toggle — both purely
@@ -117,13 +138,6 @@ export function applySpectrogramContrast() {
   S.spectrogramSettings.logY = document.getElementById('spectrogram-logy').checked;
   redraw();
   saveSpectrogramSettings();
-}
-
-export function toggleSpectrogramDisplay() {
-  const show = document.getElementById('spectrogram-show').checked;
-  if (show && S.spectrogramData) claimSubpanel('spectrogram');
-  else releaseSubpanel('spectrogram');
-  redraw();
 }
 
 // ── registry entries: subpanel traces/shapes (moved out of chart.js so
@@ -168,7 +182,7 @@ function buildSpectrogramSubpanelTraces() {
     type: 'heatmap', name: 'Спектрограмма Δratio',
     x: d.times, y: d.freqs, z: d.sxx_db,
     yaxis: 'y2',
-    colorscale: 'Viridis', zmin, zmax,
+    colorscale: S.colorProfile.spectrogram_colorscale, zmin, zmax, // "Спектрограмма: цветовая схема" role — settings.js (a Plotly colorscale NAME, not a hex)
     colorbar: { thickness: 10, len: 0.18, y: 0.09, title: { text: 'дБ', font: { size: 9 } } },
     hoverongaps: false,
     hovertemplate: 'f=%{y:.4f} цикл/бар<br>%{x}<br>%{z:.1f} дБ<extra></extra>',
@@ -189,8 +203,24 @@ function buildSpectrogramCutoffShapes() {
     .map(c => ({
       type: 'line', xref: 'paper', yref: 'y2',
       x0: 0, x1: 1, y0: c.freq, y1: c.freq,
-      line: { color: 'rgba(255,80,80,0.75)', width: 1, dash: 'dot' },
+      line: { color: hexToRgba(S.colorProfile.spectrogram_cutoff_line, 0.75), width: 1, dash: 'dot' },
     }));
+}
+
+// yaxis2 policy (project feedback 2026-08-20, §3.3 of docs/plans/
+// frontend_improvements_plan.md): fully fixed — "незачем" to zoom/pan a
+// frequency axis whose range is already exactly what fmin/fmax on the
+// request asked for. Range mirrors the backend response exactly (not left
+// to Plotly's own autorange, which could pad it slightly) — recomputed
+// fresh every render since fixedrange:true means there's no interactive
+// state to preserve, so a fresh spectrogram calc (different fmin/fmax) just
+// takes effect immediately.
+function spectrogramYAxisPolicy() {
+  const freqs = S.spectrogramData?.freqs;
+  if (!freqs?.length) return { key: 'spectrogram', fixedrange: true, range: null };
+  let lo = freqs[0], hi = freqs[freqs.length - 1];
+  if (S.spectrogramSettings.logY) { lo = Math.log10(Math.max(lo, 1e-9)); hi = Math.log10(hi); }
+  return { key: 'spectrogram', fixedrange: true, range: [lo, hi] };
 }
 
 registerTool({
@@ -198,9 +228,10 @@ registerTool({
   icon: 'spectrogram',
   label: 'Спектрограмма Δratio',
   panelId: 'tool-panel-spectrogram',
-  showCheckboxId: 'spectrogram-show',
+  onSelected: onSpectrogramSelected,
   buildSubpanelTraces: buildSpectrogramSubpanelTraces,
   buildSubpanelShapes: buildSpectrogramCutoffShapes,
+  subpanelYAxisPolicy: spectrogramYAxisPolicy,
   // no buildMainTraces/buildOriginShape/onOriginClick/resetOrigin —
   // spectrogram never draws on the main chart and has no origin concept.
 });

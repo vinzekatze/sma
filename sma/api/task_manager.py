@@ -36,6 +36,8 @@ from pathlib import Path
 
 import numpy as np
 
+from datetime import datetime, timezone
+
 from sma.core.db import (
     open_db,
     get_app_settings,
@@ -43,20 +45,49 @@ from sma.core.db import (
     update_task,
     list_tasks,
     get_instrument_by_id,
+    upsert_instrument,
     get_candles,
     get_candle_by_ts,
     save_forecast,
     upsert_candles,
-    refresh_stale_flags,
-    get_forecast_settings,
-    upsert_forecast_settings,
     upsert_forecast_defaults,
+    upsert_range_forecast_settings,
+    get_band_lambda_pool,
+    upsert_band_lambda_pool,
+    get_pool_resolution_cache,
+    upsert_pool_resolution_cache,
     prune_old_done_tasks,
 )
-from sma.core.candle_fetch import resolve_fetch_plan
+from sma.core.candle_fetch import resolve_fetch_plan, queue_pool_candle_fetch
+from sma.core.forecast.pool_selection import resolve_pool_candidates, compute_pool_key
 
 RESUMABLE_STATUSES = ("pending", "cancelled", "interrupted", "error")
 KEEP_DONE_TASKS = 10  # see db.py:prune_old_done_tasks — the queue is a work log, not a history store
+
+POOL_CACHE_TTL_HOURS = 24  # liquidity ranking uses a 30-CALENDAR-day trailing
+# window (pool_selection.LIQUIDITY_WINDOW_DAYS) — daily granularity is already
+# more than enough, so incidental re-resolutions (every pool save) reuse the
+# cached candidate list instead of re-hitting MOEX (category search +
+# per-candidate liquidity download) every time. The pool modal's "Обновить
+# по категориям" button (POST /resolve-pool) is the user's deliberate
+# refresh action and always bypasses this (force=True).
+
+POOL_RESOLVE_TIMEOUT_SEC = 180  # defensive backstop — resolve_pool_candidates
+# already bounds each MOEX request at 30s (sma/data/moex/candles.py) and runs
+# candidates concurrently, so this should never legitimately fire; it exists
+# so a genuinely stuck resolve (e.g. DNS hang bypassing requests' own
+# timeout) fails the task cleanly instead of blocking every task queued
+# behind it forever — TaskManager is strictly single-worker/sequential (see
+# module docstring), so a hung task stalls candle_fetch/forecast too, not
+# just itself (reported 2026-09-12).
+
+
+def _pool_cache_is_fresh(computed_at: str) -> bool:
+    ts = datetime.fromisoformat(computed_at)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    age_hours = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
+    return age_hours < POOL_CACHE_TTL_HOURS
 
 
 class TaskManager:
@@ -90,11 +121,30 @@ class TaskManager:
         'interrupted' (distinct from 'cancelled' — this wasn't the user's
         choice). Deliberately NOT auto-resubmitted (nor are still-'pending'
         ones) — the user resumes explicitly via resume()/resume_all().
+
+        Separately: a 'pending' task can carry cancel_requested=1 with
+        nobody left to act on it — request_cancel() only ever updates the
+        DB flag + an in-memory set; the actual pending->cancelled
+        transition normally happens inside _run_task right before a task
+        starts running. If the process restarts (e.g. dev server's
+        --reload firing on a source edit) while that task is still sitting
+        in the now-discarded in-memory queue, the cancel request is
+        orphaned forever — the task shows 'pending' (looks like it's still
+        queued) even though the user unambiguously asked to stop it
+        (reported 2026-09-12). Since cancel_requested=1 already IS that
+        unambiguous signal regardless of which process lifetime set it,
+        resolve it here instead of waiting for a queue that will never
+        process it.
         """
         async with open_db(self._db_path) as db:
-            stale = await list_tasks(db, status="running")
+            stale = await list_tasks(db, status="running", limit=1000)
             for t in stale:
                 await update_task(db, t["id"], status="interrupted")
+
+            orphaned_cancels = await list_tasks(db, status="pending", limit=1000)
+            for t in orphaned_cancels:
+                if t["cancel_requested"]:
+                    await update_task(db, t["id"], status="cancelled")
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -216,10 +266,10 @@ class TaskManager:
             await self._run_forecast(task_id, task)
         elif kind == "candle_fetch":
             await self._run_candle_fetch(task_id, task)
-        elif kind == "calibration":
-            await self._run_calibration(task_id, task)
-        elif kind == "pretest":
-            await self._run_pretest(task_id, task)
+        elif kind == "pool_resolve":
+            await self._run_pool_resolve(task_id, task)
+        elif kind == "range_forecast_calibration":
+            await self._run_range_forecast_calibration(task_id, task)
         else:
             raise ValueError(f"Unknown task kind: {kind!r}")
 
@@ -265,21 +315,30 @@ class TaskManager:
         model_type = task["params"].get("model_type", "band_lambda")
         if model_type == "simplex_ensemble":
             await self._run_forecast_simplex(task_id, task)
+        elif model_type == "regime_mixture_potential":
+            await self._run_forecast_regime_mixture_potential(task_id, task)
         else:
             await self._run_forecast_band_lambda(task_id, task)
 
     async def _run_forecast_band_lambda(self, task_id: int, task: dict) -> None:
+        """
+        T/m/theta travel straight in the task params (like simplex_ensemble's
+        params dict) — no more forecast_settings row lookup, see
+        sma/api/routes/forecasts.py:request_forecast. λ is always the
+        uniform-pool zero vector (calibration removed from prod, see memory
+        project_phase7_calibration_removed_final); pool composition is
+        whatever was last saved via POST /forecast-settings/pool, resolved by
+        that route and passed through here unchanged.
+        """
         from sma.core.forecast import band_lambda as bl
 
         loop = asyncio.get_running_loop()
         p = task["params"]
+        pool_config = p["pool"]
+        t_query, m, theta, min_bars = p["t_query"], p["m"], p["theta"], p["min_bars"]
+        zero_lambda = {f: 0.0 for f in bl.FEATURE_ORDER}
 
-        async with open_db(self._db_path) as db:
-            settings = await get_forecast_settings(db, p["forecast_settings_id"])
-        if settings is None:
-            raise ValueError(f"forecast_settings {p['forecast_settings_id']} not found")
-
-        resolved_ids = settings["pool_config"]["resolved_instrument_ids"]
+        resolved_ids = pool_config["resolved_instrument_ids"]
         target_instr, raw_arrays = await self._load_pool_ticker_data(
             task["instrument_id"], resolved_ids, task["interval"]
         )
@@ -301,32 +360,29 @@ class TaskManager:
                 if target_instr["ticker"] not in ticker_data:
                     raise ValueError("Insufficient data before the requested origin")
             return bl.forecast_live_band(
-                target_instr["ticker"], settings["t_query"], settings["lambda"], ticker_data,
-                origin_index=None, m=settings["m"], min_bars=settings["min_bars"], theta=settings["theta"],
+                target_instr["ticker"], t_query, zero_lambda, ticker_data,
+                origin_index=None, m=m, min_bars=min_bars, theta=theta,
             )
 
         result = await loop.run_in_executor(None, _compute)
         if result is None:
             raise ValueError("Недостаточно пивотов/пула для прогноза на этот origin")
 
-        params_out = {
-            "t_query": settings["t_query"], "lambda": settings["lambda"],
-            "m": settings["m"], "theta": settings["theta"], "min_bars": settings["min_bars"],
-            "forecast_settings_id": settings["id"],
-        }
+        params_out = {"t_query": t_query, "m": m, "theta": theta, "min_bars": min_bars}
 
         async with open_db(self._db_path) as db:
             origin_c = await get_candle_by_ts(
                 db, task["instrument_id"], task["interval"], result["origin_date"]
             )
-            # Snapshot the confirmation bar's close for refresh_stale_flags —
-            # origin_price is the pivot's EXTREME price (a different bar
-            # entirely), comparing that against origin_candle_id's live close
-            # would flag every forecast stale immediately.
-            result["close_at_origin"] = origin_c["close"]
             forecast_id = await save_forecast(
                 db, task["instrument_id"], task["interval"], "band_lambda",
                 origin_c["id"], params_out, result,
+            )
+            # "Last used settings" prefill (see db.py forecast_defaults
+            # docstring) — same mechanism simplex_ensemble already uses;
+            # band_lambda has no other place T/m/theta live now.
+            await upsert_forecast_defaults(
+                db, task["instrument_id"], task["interval"], "band_lambda", params_out,
             )
             await update_task(db, task_id, status="done", forecast_id=forecast_id)
 
@@ -338,14 +394,15 @@ class TaskManager:
 
     async def _run_forecast_simplex(self, task_id: int, task: dict) -> None:
         """
-        No forecast_settings row for this model — params travel straight in
-        the task (see routes/forecasts.py:request_forecast). No pool, single
+        Params travel straight in the task (see routes/forecasts.py:
+        request_forecast), same as band_lambda now does. No pool, single
         ticker: causality is enforced purely by `until=origin_ts` at load
         time (get_candles), same principle as band_lambda's mask_ticker_data
         but simpler (no pool to truncate). See simplex_ensemble.py module
         docstring for why origin_index isn't a separate parameter — origin is
         always the last loaded bar.
         """
+        import os
         from sma.core.forecast import simplex_ensemble as se
 
         loop = asyncio.get_running_loop()
@@ -356,6 +413,14 @@ class TaskManager:
                 db, task["instrument_id"], task["interval"],
                 until=(task["origin_ts"] or None),
             )
+            # Same knob as _run_range_forecast_calibration below —
+            # "Потоков вычислений (CPU)" in Настройки приложения covers every
+            # CPU-bound ProcessPoolExecutor task, not just one of them (see
+            # its own tooltip in index.html).
+            app_settings = await get_app_settings(db)
+        configured_workers = app_settings["calibration_workers"]
+        max_workers = configured_workers if configured_workers > 0 else max(1, (os.cpu_count() or 4) // 4)
+
         if len(candles) < 20:
             raise ValueError(f"Недостаточно данных [{task['interval']}] для прогноза на этот origin")
 
@@ -384,6 +449,7 @@ class TaskManager:
                 pca_thr1=pca_thr1, pca_thr2=pca_thr2,
                 use_lp_corr=p.get("use_lp_corr", se.DEFAULT_USE_LP_CORR),
                 progress_cb=_progress,
+                max_workers=max_workers,
             )
 
         result = await loop.run_in_executor(None, _compute)
@@ -411,169 +477,248 @@ class TaskManager:
             task_id, {"status": "done", "done": 1, "total": 1, "forecast_id": forecast_id}
         )
 
-    # ── kind: calibration (band_lambda) ──────────────────────────────────────
+    # ── kind: forecast (regime_mixture_potential) ────────────────────────────
 
-    async def _run_calibration(self, task_id: int, task: dict) -> None:
+    async def _run_forecast_regime_mixture_potential(self, task_id: int, task: dict) -> None:
+        """
+        Params travel straight in the task (see routes/forecasts.py:
+        request_forecast), same as simplex_ensemble/band_lambda. No pool,
+        single ticker: causality enforced purely by `until=origin_ts` at
+        load time, same principle as _run_forecast_simplex.
+
+        Премотка (n_forecasts независимых origin) фанится ВНУТРИ
+        regime_mixture_potential.forecast_regime_mixture_potential через
+        joblib/loky (см. модуль — НЕ голый ProcessPoolExecutor, sklearn.
+        GaussianMixture требует spawn-семантику loky, иначе реальный hang
+        при fork()). max_workers — тот же общий тюнинг «Потоков вычислений
+        (CPU)», что и у simplex/range_forecast_calibration.
+        """
         import os
-        from concurrent.futures import ProcessPoolExecutor
-        from datetime import datetime, timezone
-        from sma.core.forecast import band_lambda as bl
-        from sma.core.forecast import band_lambda_calibrator as calib
+        from sma.core.forecast import regime_mixture_potential as rmp
 
         loop = asyncio.get_running_loop()
         p = task["params"]
-        pool_config = p["pool"]
-        resolved_ids = pool_config["resolved_instrument_ids"]
-
-        target_instr, raw_arrays = await self._load_pool_ticker_data(
-            task["instrument_id"], resolved_ids, task["interval"]
-        )
-        if target_instr["ticker"] not in raw_arrays:
-            raise ValueError(
-                f"Недостаточно данных по тикеру {target_instr['ticker']} [{task['interval']}] "
-                "— дозагрузите через менеджер тикеров или пересоздайте задачу калибровки"
-            )
-
-        ticker_data = await loop.run_in_executor(None, bl.build_ticker_data, raw_arrays)
-
-        targets = p["targets"]           # [{"t_query": .., "min_bars": ..}, ...]
-        m = p.get("m", bl.DEFAULT_M)
-        theta = p.get("theta", bl.DEFAULT_THETA)
-        total = len(targets)
 
         async with open_db(self._db_path) as db:
+            candles = await get_candles(
+                db, task["instrument_id"], task["interval"],
+                until=(task["origin_ts"] or None),
+            )
             app_settings = await get_app_settings(db)
         configured_workers = app_settings["calibration_workers"]
-        # 0 = auto — see docs/plans/band_forecast_migration_plan.md 5.2 and
-        # feedback memory blas_oversubscription_multiprocessing (numpy ops
-        # are memory-bandwidth bound, so cpu_count itself over-subscribes).
         max_workers = configured_workers if configured_workers > 0 else max(1, (os.cpu_count() or 4) // 4)
-        executor = ProcessPoolExecutor(max_workers=max_workers, initializer=calib.init_worker_env)
-        try:
-            submitted = [
-                (spec, executor.submit(
-                    calib.calibrate_one_target, target_instr["ticker"], spec["t_query"],
-                    spec.get("min_bars", bl.DEFAULT_MIN_BARS), m, ticker_data,
-                ))
-                for spec in targets
-            ]
-            done = 0
-            for spec, fut in submitted:
-                if self.is_cancel_requested(task_id):
-                    for _, f in submitted:
-                        f.cancel()
-                    async with open_db(self._db_path) as db:
-                        await update_task(db, task_id, status="cancelled")
-                    self._broadcast(task_id, {"status": "cancelled"})
-                    return
 
-                result = await asyncio.wrap_future(fut)
-                min_bars = spec.get("min_bars", bl.DEFAULT_MIN_BARS)
-                if not result.get("skipped"):
-                    width_rel = (
-                        result["final_width"] / result["final_baseline_width"]
-                        if result["final_width"] and result["final_baseline_width"] else None
-                    )
-                    async with open_db(self._db_path) as db:
-                        await upsert_forecast_settings(
-                            db, task["instrument_id"], task["interval"], "band_lambda",
-                            spec["t_query"], min_bars, result["lambdas"], m, theta,
-                            pool_config, pool_config["pool_key"],
-                            {
-                                "n_passes": result["n_passes"],
-                                "converged": result["n_passes"] < calib.DEFAULT_MAX_PASSES,
-                                "pinball_rel": result["final_rel"],
-                                "width_rel": width_rel,
-                                "n_holdout": result["n_holdout"],
-                                "calibrated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                            },
-                        )
-                done += 1
-                self._broadcast(task_id, {"status": "running", "done": done, "total": total})
-                async with open_db(self._db_path) as db:
-                    await update_task(db, task_id, progress_done=done, progress_total=total)
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        if len(candles) < 20:
+            raise ValueError(f"Недостаточно данных [{task['interval']}] для прогноза на этот origin")
+
+        times = np.array([c["begin"] for c in candles])
+        close = np.array([c["close"] for c in candles], dtype=np.float64)
+
+        def _progress(done: int, total: int) -> None:
+            self._report_progress(task_id, loop, done, total)
+
+        def _compute():
+            return rmp.forecast_regime_mixture_potential(
+                times, close,
+                horizon=p.get("horizon", rmp.DEFAULT_HORIZON),
+                n_forecasts=p.get("n_forecasts", rmp.DEFAULT_N_FORECASTS),
+                rewind_step=p.get("rewind_step", rmp.DEFAULT_REWIND_STEP),
+                theta=p.get("theta", rmp.DEFAULT_THETA),
+                warmup=p.get("warmup", rmp.DEFAULT_WARMUP),
+                theiler_window=p.get("theiler_window", rmp.DEFAULT_THEILER_WINDOW),
+                bars=p.get("bars", rmp.DEFAULT_BARS),
+                n_lookback=p.get("n_lookback", rmp.DEFAULT_N_LOOKBACK),
+                lookback_step=p.get("lookback_step", rmp.DEFAULT_LOOKBACK_STEP),
+                n_sim=p.get("n_sim", rmp.DEFAULT_N_SIM),
+                seed=p.get("seed", rmp.DEFAULT_SEED),
+                mix_n_resample=p.get("mix_n_resample", rmp.DEFAULT_MIX_N_RESAMPLE),
+                bin_height_pct=p.get("bin_height_pct", rmp.DEFAULT_BIN_HEIGHT_PCT),
+                coverage_pct=p.get("coverage_pct", rmp.DEFAULT_COVERAGE_PCT),
+                progress_cb=_progress,
+                max_workers=max_workers,
+            )
+
+        result = await loop.run_in_executor(None, _compute)
+        if "error" in result:
+            raise ValueError(result["error"])
+
+        params_out = {k: v for k, v in p.items() if k != "model_type"}
 
         async with open_db(self._db_path) as db:
-            await update_task(db, task_id, status="done")
-        self._broadcast(task_id, {"status": "done", "done": total, "total": total})
+            origin_c = await get_candle_by_ts(
+                db, task["instrument_id"], task["interval"], result["origin_date"]
+            )
+            forecast_id = await save_forecast(
+                db, task["instrument_id"], task["interval"], "regime_mixture_potential",
+                origin_c["id"], params_out, result,
+            )
+            await upsert_forecast_defaults(
+                db, task["instrument_id"], task["interval"], "regime_mixture_potential", params_out,
+            )
+            await update_task(db, task_id, status="done", forecast_id=forecast_id)
 
-    # ── kind: pretest (band_lambda) ──────────────────────────────────────────
+        self._broadcast(
+            task_id, {"status": "done", "done": 1, "total": 1, "forecast_id": forecast_id}
+        )
 
-    async def _run_pretest(self, task_id: int, task: dict) -> None:
-        from datetime import date
-        from sma.core.forecast import band_lambda as bl
+    # ── kind: range_forecast_calibration ─────────────────────────────────────
+
+    async def _run_range_forecast_calibration(self, task_id: int, task: dict) -> None:
+        """
+        θ+5λ+read-квантиль координатный спуск для ОДНОЙ (h_steps, p, theiler)
+        комбинации одного тикера — нет пула, нет фан-аута по нескольким T,
+        поэтому один блокирующий вызов через run_in_executor (тот же
+        паттерн, что _run_forecast_simplex), а не ProcessPoolExecutor-
+        фан-аут (band_lambda's λ-calibration used to fan out this way
+        before it was removed from prod, see band_lambda_calibrator.py's
+        module docstring).
+        """
+        from datetime import datetime, timezone
+        from sma.core.forecast import range_forecast_calibrator as rfc
 
         loop = asyncio.get_running_loop()
         p = task["params"]
-        level = p["level"]
-
-        if level == 1:
-            from sma.data.moex import get_security_history_range
-
-            candidates = p["candidates"]  # [{"secid","engine","market","board"}, ...] — no DB rows needed
-
-            def _run_level1():
-                rows = []
-                for c in candidates:
-                    try:
-                        boards = get_security_history_range(c["secid"])
-                    except Exception:
-                        continue
-                    board_row = next(
-                        (b for b in boards if str(b.get("boardid", "")).upper() == str(c.get("board") or "").upper()),
-                        None,
-                    ) or next((b for b in boards if b.get("is_primary") in (1, True, "1")), None) \
-                      or (boards[0] if boards else None)
-                    if not board_row:
-                        continue
-                    hf, ht = board_row.get("history_from"), board_row.get("history_till")
-                    if not hf or not ht:
-                        continue
-                    try:
-                        years = (date.fromisoformat(str(ht)[:10]) - date.fromisoformat(str(hf)[:10])).days / 365.25
-                    except ValueError:
-                        continue
-                    rows.append({"secid": c["secid"], "years": round(years, 2)})
-                return rows
-
-            rows = await loop.run_in_executor(None, _run_level1)
-            summary = {
-                "level": 1, "n_candidates": len(candidates), "n_resolved": len(rows),
-                "total_years": round(sum(r["years"] for r in rows), 1),
-                "avg_years": round(sum(r["years"] for r in rows) / len(rows), 2) if rows else 0.0,
-                "per_ticker": rows,
-            }
-        else:
-            pool_config = p["pool"]
-            resolved_ids = pool_config["resolved_instrument_ids"]
-            t_query = p["t_query"]
-            min_bars = p.get("min_bars", bl.DEFAULT_MIN_BARS)
-
-            _target_instr, raw_arrays = await self._load_pool_ticker_data(
-                task["instrument_id"], resolved_ids, task["interval"]
-            )
-
-            def _run_level2():
-                rows = []
-                for ticker, (lh, ll, dates, _vol) in raw_arrays.items():
-                    pivots, _ext, _conf, _dirs = bl.build_zigzag(lh, ll, dates, t_query, min_bars)
-                    rows.append({"ticker": ticker, "n_events": len(pivots), "n_bars": len(lh)})
-                return rows
-
-            rows = await loop.run_in_executor(None, _run_level2)
-            summary = {
-                "level": 2, "t_query": t_query, "min_bars": min_bars,
-                "n_tickers": len(rows),
-                "total_events": sum(r["n_events"] for r in rows),
-                "avg_events": round(sum(r["n_events"] for r in rows) / len(rows), 1) if rows else 0.0,
-                "per_ticker": rows,
-            }
+        h_steps, p_lags, theiler = p["h_steps"], p["p"], p["theiler"]
+        levels = tuple(p.get("levels", (50, 75, 90)))
+        max_candles = p.get("max_candles", rfc.MAX_CANDLES_DEFAULT)
 
         async with open_db(self._db_path) as db:
+            candles = await get_candles(db, task["instrument_id"], task["interval"])
+        if len(candles) < 200:
+            raise ValueError(f"Недостаточно данных [{task['interval']}] для калибровки")
+
+        close = np.array([c["close"] for c in candles], dtype=np.float64)
+        high = np.array([c["high"] for c in candles], dtype=np.float64)
+        low = np.array([c["low"] for c in candles], dtype=np.float64)
+        volume = np.array([c["volume"] for c in candles], dtype=np.float64)
+
+        def _progress(done: int, total: int) -> None:
+            self._report_progress(task_id, loop, done, total)
+
+        def _compute():
+            return rfc.calibrate_combined_multipass(
+                close, high, low, H=h_steps, p=p_lags, theiler=theiler,
+                volumes=volume, levels=levels, max_candles=max_candles, progress_cb=_progress,
+            )
+
+        result = await loop.run_in_executor(None, _compute)
+        if result.get("skipped"):
+            raise ValueError(f"Калибровка не удалась: {result.get('reason', 'недостаточно истории')}")
+
+        async with open_db(self._db_path) as db:
+            await upsert_range_forecast_settings(
+                db, task["instrument_id"], task["interval"], h_steps, p_lags, theiler,
+                result["params"], list(result["params"].keys()),
+                {str(lv): qr for lv, qr in result["q_read_by_level"].items()},
+                {
+                    "n_passes": result["n_passes"], "converged": result["converged"],
+                    "final_ratio": result["final_ratio"], "final_baseline_ratio": result["final_baseline_ratio"],
+                    "final_rel": result["final_rel"], "n_holdout": result["n_holdout"],
+                    "levels": list(result["levels"]), "widest_level": result["widest_level"],
+                    "max_candles": max_candles,
+                    "calibrated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                },
+            )
             await update_task(db, task_id, status="done")
-        self._broadcast(task_id, {"status": "done", "done": 1, "total": 1, "summary": summary})
+        self._broadcast(task_id, {"status": "done", "done": 1, "total": 1})
+
+    # ── kind: pool_resolve (band_lambda pool modal) ──────────────────────────
+
+    async def _resolve_and_upsert_pool(self, db, pool: dict, force: bool = False) -> tuple[list[dict], dict]:
+        """
+        resolve_pool_candidates hits MOEX ISS synchronously (blocking
+        requests calls) — run off the event loop (with a defensive overall
+        timeout, POOL_RESOLVE_TIMEOUT_SEC), and only when
+        pool_resolution_cache is missing/stale/bypassed (force=True). Each
+        candidate is upserted as added_via='pool' (see docs/plans/
+        band_forecast_migration_plan.md 5.2a) — this never downgrades an
+        existing 'manual' instrument, and existing 'pool'/'manual' rows are
+        reused as-is (upsert, not insert-only) — that upsert pass always
+        runs, cache hit or not, since it's cheap (local DB only).
+
+        pool["manual_instrument_ids"], when set, skips MOEX category
+        resolution entirely — the pool modal's manually-edited pool list.
+        categories/n are kept in pool_config only as the "recommended
+        starting point" label; resolved_instrument_ids is exactly the
+        manual list in that case.
+
+        Returns (instrument_rows, pool_config) where pool_config is ready to
+        store verbatim in band_lambda_pool.pool_config_json.
+        resolved_tickers ({id, ticker} pairs) rides along so the frontend
+        never needs a second round trip just to LABEL the resolved ids.
+        """
+        categories = pool.get("categories", [])
+        n = pool.get("n", 25)
+        manual_instrument_ids = pool.get("manual_instrument_ids")
+
+        if manual_instrument_ids is not None:
+            rows = []
+            for iid in manual_instrument_ids:
+                row = await get_instrument_by_id(db, iid)
+                if row is not None:
+                    rows.append(row)
+        else:
+            pool_key = compute_pool_key(categories, n)
+            cached = None if force else await get_pool_resolution_cache(db, pool_key)
+            if cached is not None and _pool_cache_is_fresh(cached["computed_at"]):
+                candidates = cached["candidates"]
+            else:
+                app_settings = await get_app_settings(db)
+                loop = asyncio.get_running_loop()
+                try:
+                    candidates = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, resolve_pool_candidates, categories, n, app_settings["moex_pool_workers"]
+                        ),
+                        timeout=POOL_RESOLVE_TIMEOUT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    raise ValueError(
+                        f"Резолвинг пула превысил {POOL_RESOLVE_TIMEOUT_SEC}с (MOEX недоступен/слишком медленный) — попробуйте ещё раз"
+                    )
+                await upsert_pool_resolution_cache(db, pool_key, candidates)
+            rows = []
+            for c in candidates:
+                iid = await upsert_instrument(
+                    db, c["secid"], "moex", c["asset_type"], c.get("name") or c.get("shortname"),
+                    engine=c["engine"], market=c["market"], board=c.get("board"),
+                    added_via="pool",
+                )
+                rows.append(await get_instrument_by_id(db, iid))
+
+        pool_config = {
+            "categories": categories, "n": n,
+            "resolved_instrument_ids": [r["id"] for r in rows],
+            "resolved_tickers": [{"id": r["id"], "ticker": r["ticker"]} for r in rows],
+            "pool_key": compute_pool_key(categories, n),
+        }
+        return rows, pool_config
+
+    async def _run_pool_resolve(self, task_id: int, task: dict) -> None:
+        """
+        Backs both POST /forecast-settings/pool (save=True — also persists
+        to band_lambda_pool and queues a freshness-aware candle_fetch per
+        pool ticker) and POST /forecast-settings/resolve-pool (save=False —
+        preview only). Moved off the request/response cycle 2026-09-12: it
+        used to run synchronously inside the route handler, which could
+        make the request hang for as long as MOEX took with zero
+        visibility/cancel/timeout — see POOL_RESOLVE_TIMEOUT_SEC above.
+        """
+        p = task["params"]
+        instrument_id, interval = task["instrument_id"], task["interval"]
+
+        async with open_db(self._db_path) as db:
+            pool_rows, pool_config = await self._resolve_and_upsert_pool(db, p["pool"], force=not p["save"])
+            if not pool_rows:
+                raise ValueError(
+                    f"Пул пуст — ни один кандидат не прошёл порог ликвидности для категорий {p['pool'].get('categories')}"
+                )
+            if p["save"]:
+                await queue_pool_candle_fetch(db, self, pool_rows, interval)
+                await upsert_band_lambda_pool(db, instrument_id, interval, pool_config)
+            await update_task(db, task_id, status="done")
+
+        self._broadcast(task_id, {"status": "done", "done": 1, "total": 1, "pool": pool_config})
 
     # ── kind: candle_fetch ───────────────────────────────────────────────────
 
@@ -607,7 +752,6 @@ class TaskManager:
 
         async with open_db(self._db_path) as db:
             n = await upsert_candles(db, task["instrument_id"], interval, candles)
-            await refresh_stale_flags(db, task["instrument_id"], interval)
             await update_task(db, task_id, status="done")
 
         self._broadcast(

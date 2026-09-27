@@ -1,19 +1,16 @@
-# data fetching
+# Production dependencies (no Streamlit — prototype only)
 requests>=2.31.0
 tqdm>=4.65.0
 
-# analysis / forecasting
 pandas>=2.0.0
 numpy>=1.24.0
 scipy>=1.11.0
 pydantic>=2.0.0
 aiosqlite>=0.19.0
+scikit-learn>=1.4.0  # regime_mixture_potential.py — GaussianMixture-сценарии (+ joblib/loky для параллельного фан-аута по origin)
 
-# api
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 aiofiles>=23.0.0
 
-# web UI
-streamlit>=1.35.0
 plotly>=5.20.0

@@ -15,10 +15,10 @@ from sma.core.db import (
     get_forecast,
     list_forecasts,
     update_forecast_geometry,
-    get_forecast_settings,
-    get_active_forecast_settings,
+    get_band_lambda_pool,
 )
 from sma.core.candle_fetch import queue_pool_candle_fetch
+from sma.core.forecast import band_lambda as bl
 from sma.api.deps import get_db, get_task_manager
 from sma.api.task_manager import TaskManager
 
@@ -29,15 +29,20 @@ class ForecastRequest(BaseModel):
     instrument_id: int
     interval: str
     model_type: str = "band_lambda"
-    t_query: float | None = None                # band_lambda only
-    forecast_settings_id: int | None = None      # band_lambda only
+    t_query: float | None = None                 # band_lambda only — free live parameter, no calibration/saved-T lookup any more
+    m: int | None = None                          # band_lambda only
+    theta: float | None = None                    # band_lambda only
+    min_bars: int | None = None                   # band_lambda only
     origin_candle_id: int | None = None          # None = live ("as of now")
-    params: dict | None = None                   # simplex_ensemble only — see
+    params: dict | None = None                   # simplex_ensemble/regime_mixture_potential only — see
     # sma/core/forecast/simplex_ensemble.py:forecast_ensemble for the accepted
     # keys (window/horizon/xy_x/xy_y/xi_add/blend_alpha/n_levels/
-    # p_cascade_max/bars/pca_p_range/pca_thr_range/use_lp_corr). No
-    # forecast_settings row for this model — params travel straight in the
-    # task, unlike band_lambda's calibrate-then-activate flow.
+    # p_cascade_max/bars/pca_p_range/pca_thr_range/use_lp_corr), or
+    # sma/core/forecast/regime_mixture_potential.py:forecast_regime_mixture_
+    # potential (horizon/n_forecasts/rewind_step/theta/warmup/theiler_window/
+    # bars/n_lookback/lookback_step/n_sim/seed/mix_n_resample/bin_height_pct/
+    # coverage_pct). No settings row for either model — params travel
+    # straight in the task, same as band_lambda now does.
 
 
 class ForecastTaskResponse(BaseModel):
@@ -58,12 +63,12 @@ async def request_forecast(
     Create a background forecast task. Poll GET /tasks/{task_id} or connect
     to WS /tasks/{task_id}/ws for progress/result (forecast_id).
 
-    The pool used is whatever forecast_settings.pool_config_json fixed at
-    calibration time (not re-resolved by category here) — but its DATA is
-    refreshed: one incremental candle_fetch task per pool ticker is queued
-    ahead of the forecast task itself (see docs/plans/band_forecast_
-    migration_plan.md 5.2 — a pool frozen at calibration time would
-    otherwise miss events that happened since).
+    band_lambda's pool is whatever was last saved via POST /forecast-
+    settings/pool for this (instrument, interval) — T/m/theta are free live
+    parameters on every request instead (no more per-T saved row, see
+    memory project_phase7_calibration_removed_final). Pool DATA is still
+    refreshed here: one freshness-aware candle_fetch task per pool ticker is
+    queued ahead of the forecast task itself (sma/core/candle_fetch.py).
     """
     instr = await get_instrument_by_id(db, body.instrument_id)
     if instr is None:
@@ -90,17 +95,32 @@ async def request_forecast(
         await tm.submit(task_id)
         return ForecastTaskResponse(task_id=task_id)
 
+    if body.model_type == "regime_mixture_potential":
+        origin_ts = ""
+        if body.origin_candle_id is not None:
+            origin_candle = await get_candle_by_id(db, body.origin_candle_id)
+            if origin_candle is None or origin_candle["instrument_id"] != body.instrument_id:
+                raise HTTPException(404, "origin_candle_id not found for this instrument")
+            origin_ts = origin_candle["begin"]
+
+        # No pool (single ticker) — same freshness guarantee as simplex_ensemble.
+        await queue_pool_candle_fetch(db, tm, [instr], body.interval)
+
+        label = f"Потенциал {instr['ticker']} [{body.interval}]"
+        task_id = await create_task(
+            db, body.instrument_id, body.interval, origin_ts,
+            {"model_type": "regime_mixture_potential", **(body.params or {})},
+            kind="forecast", label=label,
+        )
+        await tm.submit(task_id)
+        return ForecastTaskResponse(task_id=task_id)
+
     if body.t_query is None:
         raise HTTPException(400, "t_query is required for band_lambda")
 
-    if body.forecast_settings_id is not None:
-        settings = await get_forecast_settings(db, body.forecast_settings_id)
-    else:
-        settings = await get_active_forecast_settings(
-            db, body.instrument_id, body.interval, body.model_type, body.t_query
-        )
-    if settings is None:
-        raise HTTPException(400, f"T={body.t_query} не откалиброван для этого инструмента — сначала запустите калибровку")
+    pool_config = await get_band_lambda_pool(db, body.instrument_id, body.interval)
+    if pool_config is None:
+        raise HTTPException(400, "Пул не настроен для этого инструмента — откройте «Пул…» в «Параметры»")
 
     origin_ts = ""
     if body.origin_candle_id is not None:
@@ -109,14 +129,18 @@ async def request_forecast(
             raise HTTPException(404, "origin_candle_id not found for this instrument")
         origin_ts = origin_candle["begin"]
 
-    resolved_ids = settings["pool_config"]["resolved_instrument_ids"]
+    resolved_ids = pool_config["resolved_instrument_ids"]
     pool_rows = [r for iid in resolved_ids if (r := await get_instrument_by_id(db, iid)) is not None]
     await queue_pool_candle_fetch(db, tm, pool_rows, body.interval)
+
+    m = body.m if body.m is not None else bl.DEFAULT_M
+    theta = body.theta if body.theta is not None else bl.DEFAULT_THETA
+    min_bars = body.min_bars if body.min_bars is not None else bl.DEFAULT_MIN_BARS
 
     label = f"Прогноз {instr['ticker']} [{body.interval}] T={body.t_query*100:.0f}%"
     task_id = await create_task(
         db, body.instrument_id, body.interval, origin_ts,
-        {"forecast_settings_id": settings["id"]},
+        {"t_query": body.t_query, "m": m, "theta": theta, "min_bars": min_bars, "pool": pool_config},
         kind="forecast", label=label,
     )
     await tm.submit(task_id)
@@ -147,12 +171,13 @@ async def get_zigzag(
     def _run():
         import numpy as np
         from sma.core.forecast.band_lambda import build_zigzag
+        from sma.core.forecast.pivot_time_band import zigzag_direction_stats
 
         log_highs = np.log(np.array([c["high"] for c in candles], dtype=np.float64))
         log_lows = np.log(np.array([c["low"] for c in candles], dtype=np.float64))
         dates = np.array([c["begin"] for c in candles])
         prices, extreme_dates, confirm_dates, directions = build_zigzag(log_highs, log_lows, dates, t_query, min_bars)
-        return [
+        pivots = [
             {
                 "extreme_date": str(extreme_dates[i]),
                 "confirm_date": str(confirm_dates[i]),
@@ -161,10 +186,12 @@ async def get_zigzag(
             }
             for i in range(len(prices))
         ]
+        stats = zigzag_direction_stats(prices, dates, confirm_dates, directions)
+        return pivots, stats
 
     loop = asyncio.get_running_loop()
-    pivots = await loop.run_in_executor(None, _run)
-    return {"pivots": pivots}
+    pivots, stats = await loop.run_in_executor(None, _run)
+    return {"pivots": pivots, "stats": stats}
 
 
 @router.get("/{forecast_id}")

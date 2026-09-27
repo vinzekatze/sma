@@ -1,9 +1,8 @@
-// simplex_ensemble — «Прогноз»-инструмент модели simplex_ensemble (ансамбль
+// simplex_ensemble — «Прогноз»-инструмент модели Simplex-ансамбля (ансамбль
 // Simplex projection по нескольким origin), свой toolbar tool наравне с
-// band_lambda (forecast.js) — не заменяет его, а дополняет как
+// Band Lambda (forecast.js) — не заменяет его, а дополняет как
 // вспомогательный инструмент оценки ситуации (см. sma/core/forecast/
-// simplex_ensemble.py докстринг и /home/kali/.claude/plans/
-// unified-kindling-lagoon.md).
+// simplex_ensemble.py докстринг).
 //
 // История/выбор/пины — общие механизмом (не общим DOM) для всех моделей, см.
 // forecast_history.js (этот файл зависит от него, не от forecast.js —
@@ -20,7 +19,7 @@
 
 import { S } from './state.js';
 import { api, setStatus, connectTaskWS } from './api.js';
-import { renderChart, setOrigin } from './chart.js';
+import { renderChart, setOrigin, resolveOriginCandle } from './chart.js';
 import { refreshTasks } from './tasks.js';
 import { registerModelHandlers, loadAndRenderForecast } from './forecast_history.js';
 import { registerTool } from './tools.js';
@@ -39,7 +38,7 @@ registerModelHandlers('simplex_ensemble', {
 // S.activeMainTool with analyzers instead of a separate exclusivity slot.
 // No buildMainTraces — chart presence flows through the pre-existing pin/
 // select overlay system, this is purely toolbar placement + click-target
-// arbitration. Unlike band_lambda, no zigzag-pivot lookup on click — just
+// arbitration. Unlike Band Lambda, no zigzag-pivot lookup on click — just
 // the shared origin marker (see resolveOriginCandle below for how origin
 // resolves to a candle at submit time).
 registerTool({
@@ -47,7 +46,7 @@ registerTool({
   surface: 'main',
   group: 'forecaster',
   icon: 'ensemble',
-  label: 'simplex_ensemble — ансамбль по origin',
+  label: 'Simplex-ансамбль — проекция по нескольким origin',
   panelId: 'tool-panel-simplex_ensemble',
   onOriginClick: setOrigin,
 });
@@ -93,7 +92,7 @@ function applySimplexParams(p) {
   const useAll = !p.bars || p.bars === 0;
   document.getElementById('simplex-use-all-bars').checked = useAll;
   const barsInput = document.getElementById('simplex-bars');
-  barsInput.value = useAll ? 3000 : p.bars;
+  barsInput.value = useAll ? 5000 : p.bars;
   barsInput.disabled = useAll;
   document.getElementById('simplex-pca-p-min').value = p.pca_p_range[0];
   document.getElementById('simplex-pca-p-max').value = p.pca_p_range[1];
@@ -121,20 +120,10 @@ export async function loadSimplexDefaults() {
   }
 }
 
-// ── origin resolution ─────────────────────────────────────────────────────
-// No zigzag/pivot here (unlike band_lambda's findOriginPivot) — origin IS
-// the clicked bar itself. S.originTs is a 10-char date (chart.js click
-// handler always truncates to date, regardless of interval — same
-// limitation band_lambda's own pivot matching has for intraday intervals);
-// candle.begin may carry a full timestamp, hence the slice comparison. When
-// a date has several intraday bars, the LAST one is "the last known bar"
-// for that day — matches the model's own semantics (origin = last known
-// bar, h=1 predicts the bar AFTER it).
-function resolveOriginCandle() {
-  if (!S.originTs) return null;
-  const matches = S.candles.filter(c => c.begin.slice(0, 10) === S.originTs);
-  return matches.length ? matches[matches.length - 1] : null;
-}
+// origin resolution: no zigzag/pivot here (unlike band_lambda's
+// findOriginPivot) — origin IS the clicked bar itself, resolved via
+// chart.js:resolveOriginCandle (shared with every other "live origin"
+// forecast tool).
 
 // ── submit / progress ────────────────────────────────────────────────────
 

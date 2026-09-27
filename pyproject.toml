@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sma"
+version = "0.1.0"
+description = "MOEX quote forecasting: FastAPI backend + JS frontend"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["sma*"]

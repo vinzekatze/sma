@@ -14,19 +14,20 @@ forecasts        — one row per forecast, discriminated by model_type; anchored
                     valid point) via FK. result_json is immutable once
                     written; zone_geometry_json is the only editable field
                     (visual drag-resize of the band shapes on the chart).
-forecast_settings — a calibration result (λ weights etc.) for one
-                    (instrument, interval, model_type, t_query, pool_key).
-                    Several pool_key rows can coexist for the same T so
-                    different pool compositions can be compared side by
-                    side; is_active marks which one live forecasts use.
+band_lambda_pool — the ONE pool composition for a given (instrument,
+                    interval) — categories/n/resolved tickers. T is a free
+                    live parameter on every forecast request (no longer a
+                    saved dimension — λ-calibration and per-T saved rows
+                    were removed 2026-09-12, see memory
+                    project_phase7_calibration_removed_final), so only the
+                    pool itself still needs persisting.
 display_presets  — named visual settings (band levels/opacity), independent
                     of any specific forecast — reused across models.
 forecast_defaults — last-used UI params for (instrument, interval, model_type),
                     auto-saved server-side after every successful forecast of
                     that model_type and auto-loaded to prefill the form next
-                    time — currently only simplex_ensemble writes this;
-                    band_lambda has its own, older "active settings" concept
-                    (forecast_settings.is_active) and doesn't use this table.
+                    time — simplex_ensemble and band_lambda (t_query/m/theta)
+                    both write this now.
 analysis_settings — same idea as forecast_defaults but for the Анализ tab's
                     analyzers (analyzer_type='spectrogram' currently) —
                     client-saved (POST /series/analysis-settings, called
@@ -37,6 +38,12 @@ tasks            — background job queue (pending → running → done/error).
 app_settings     — singleton row (id=1) of global tunables (MOEX request
                     concurrency, calibration worker count) editable from the
                     left panel — see sma/api/routes/settings.py.
+pool_resolution_cache — TTL cache of resolve_pool_candidates()'s result,
+                    keyed by pool_key (categories+n) — avoids re-hitting MOEX
+                    (category search + per-candidate liquidity ranking) on
+                    every incidental pool resolution; the settings modal's
+                    explicit "Обновить по категориям" button bypasses this
+                    (force=True) since that's the user's deliberate refresh.
 """
 
 from __future__ import annotations
@@ -95,24 +102,30 @@ CREATE TABLE IF NOT EXISTS forecasts (
 CREATE INDEX IF NOT EXISTS idx_forecasts_lookup
     ON forecasts(instrument_id, interval, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS forecast_settings (
+CREATE TABLE IF NOT EXISTS band_lambda_pool (
+    instrument_id     INTEGER NOT NULL REFERENCES instruments(id),
+    interval          TEXT    NOT NULL,
+    pool_config_json  TEXT    NOT NULL,
+    updated_at        TEXT    NOT NULL,
+    PRIMARY KEY (instrument_id, interval)
+);
+
+CREATE TABLE IF NOT EXISTS range_forecast_settings (
     id                    INTEGER PRIMARY KEY,
     instrument_id         INTEGER NOT NULL REFERENCES instruments(id),
     interval              TEXT    NOT NULL,
-    model_type            TEXT    NOT NULL,
-    t_query               REAL    NOT NULL,
-    min_bars              INTEGER NOT NULL DEFAULT 5,
-    lambda_json           TEXT    NOT NULL,
-    m                     INTEGER NOT NULL DEFAULT 6,
-    theta                 REAL    NOT NULL DEFAULT 0,
-    pool_config_json      TEXT    NOT NULL,
-    pool_key              TEXT    NOT NULL,
-    is_active             INTEGER NOT NULL DEFAULT 1,
+    h_steps               INTEGER NOT NULL,
+    p                     INTEGER NOT NULL,
+    theiler               INTEGER NOT NULL,
+    params_json           TEXT    NOT NULL,
+    feature_order_json    TEXT    NOT NULL,
+    q_read_by_level_json  TEXT    NOT NULL,
     calibration_meta_json TEXT    NOT NULL,
-    UNIQUE(instrument_id, interval, model_type, t_query, pool_key)
+    is_active             INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(instrument_id, interval, h_steps, p, theiler)
 );
-CREATE INDEX IF NOT EXISTS idx_forecast_settings_lookup
-    ON forecast_settings(instrument_id, interval, model_type);
+CREATE INDEX IF NOT EXISTS idx_range_forecast_settings_lookup
+    ON range_forecast_settings(instrument_id, interval);
 
 CREATE TABLE IF NOT EXISTS display_presets (
     id          INTEGER PRIMARY KEY,
@@ -166,6 +179,12 @@ CREATE TABLE IF NOT EXISTS app_settings (
     calibration_workers INTEGER NOT NULL DEFAULT 0,
     updated_at          TEXT    NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS pool_resolution_cache (
+    pool_key        TEXT    PRIMARY KEY,
+    candidates_json TEXT    NOT NULL,
+    computed_at     TEXT    NOT NULL
+);
 """
 
 
@@ -191,6 +210,12 @@ _MIGRATIONS = [
     "ALTER TABLE tasks            ADD COLUMN label              TEXT    NOT NULL DEFAULT ''",
     "ALTER TABLE tasks            ADD COLUMN cancel_requested   INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE tasks            ADD COLUMN updated_at         TEXT    NOT NULL DEFAULT ''",
+    "ALTER TABLE app_settings     ADD COLUMN color_profile_json TEXT",
+    "ALTER TABLE app_settings     ADD COLUMN chart_window_bars  INTEGER NOT NULL DEFAULT 1000",
+    "ALTER TABLE display_presets  ADD COLUMN trade_level_pct    REAL    NOT NULL DEFAULT 70",
+    "ALTER TABLE display_presets  ADD COLUMN show_zones         INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE display_presets  ADD COLUMN show_trade_level   INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE display_presets  ADD COLUMN trim_zone1         INTEGER NOT NULL DEFAULT 0",
 ]
 
 
@@ -225,11 +250,26 @@ async def _drop_series_settings_table(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
+async def _drop_forecast_settings_table(db: aiosqlite.Connection) -> None:
+    """
+    forecast_settings held one row per (instrument, interval, model_type,
+    t_query, pool_key) — band_lambda's per-T saved calibration result.
+    Removed 2026-09-12 alongside λ-calibration itself and the "pick a
+    pre-saved T" UI: T is now a free live parameter on every forecast
+    request, and only the pool composition still needs persisting (see
+    band_lambda_pool above). Drop unconditionally; nothing reads this
+    table's contents any more.
+    """
+    await db.execute("DROP TABLE IF EXISTS forecast_settings")
+    await db.commit()
+
+
 async def init_db(path: str | Path) -> None:
     """Create tables if they don't exist yet; run safe column migrations."""
     async with aiosqlite.connect(path) as db:
         await _drop_stale_forecasts_table(db)
         await _drop_series_settings_table(db)
+        await _drop_forecast_settings_table(db)
         await db.executescript(_SCHEMA)
         await db.commit()
         for sql in _MIGRATIONS:
@@ -416,14 +456,24 @@ async def get_candles(
     interval: str,
     since: str | None = None,
     until: str | None = None,
+    limit: int | None = None,
 ) -> list[dict]:
-    """Return candles ordered by begin asc, optionally filtered by date range."""
+    """Return candles ordered by begin asc, optionally filtered by date range.
+
+    `limit` takes the LAST `limit` rows matching since/until (windowed chart
+    loading, sma/ui/candle_window.js) — implemented as ORDER BY begin DESC
+    LIMIT ? then reversed back to asc, since a plain ASC+LIMIT would instead
+    take the OLDEST rows in range, not the most recent."""
     q = "SELECT * FROM candles WHERE instrument_id=? AND interval=?"
     args: list[Any] = [instrument_id, interval]
     if since:
         q += " AND begin >= ?"; args.append(since)
     if until:
         q += " AND begin <= ?"; args.append(until)
+    if limit:
+        q += " ORDER BY begin DESC LIMIT ?"; args.append(limit)
+        cursor = await db.execute(q, args)
+        return [dict(r) for r in reversed(await cursor.fetchall())]
     q += " ORDER BY begin ASC"
     cursor = await db.execute(q, args)
     return [dict(r) for r in await cursor.fetchall()]
@@ -470,6 +520,64 @@ async def list_instrument_coverage(
     return [dict(r) for r in await cursor.fetchall()]
 
 
+async def get_last_fetched_at(
+    db: aiosqlite.Connection,
+    instrument_id: int,
+    interval: str,
+) -> str | None:
+    """
+    Most recent `fetched_at` among this instrument+interval's candles — i.e.
+    "when did we last successfully hit MOEX for this data", used by
+    candle_fetch.queue_pool_candle_fetch to skip re-queuing a fetch that
+    just happened (see FRESHNESS_TTL_SECONDS there).
+    """
+    cursor = await db.execute(
+        "SELECT MAX(fetched_at) FROM candles WHERE instrument_id=? AND interval=?",
+        (instrument_id, interval),
+    )
+    row = await cursor.fetchone()
+    return row[0] if row else None
+
+
+# ── pool resolution cache ─────────────────────────────────────────────────────
+# Caches resolve_pool_candidates()'s expensive MOEX category-search +
+# liquidity-ranking pass (sma/core/forecast/pool_selection.py) by pool_key
+# (categories+n) — see _resolve_and_upsert_pool in
+# sma/api/routes/forecast_settings.py for the freshness check that decides
+# whether to use this or recompute.
+
+async def get_pool_resolution_cache(
+    db: aiosqlite.Connection,
+    pool_key: str,
+) -> dict | None:
+    cursor = await db.execute(
+        "SELECT candidates_json, computed_at FROM pool_resolution_cache WHERE pool_key=?",
+        (pool_key,),
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    return {"candidates": json.loads(row["candidates_json"]), "computed_at": row["computed_at"]}
+
+
+async def upsert_pool_resolution_cache(
+    db: aiosqlite.Connection,
+    pool_key: str,
+    candidates: list[dict],
+) -> None:
+    await db.execute(
+        """
+        INSERT INTO pool_resolution_cache (pool_key, candidates_json, computed_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(pool_key) DO UPDATE SET
+            candidates_json = excluded.candidates_json,
+            computed_at     = excluded.computed_at
+        """,
+        (pool_key, json.dumps(candidates, ensure_ascii=False), _utcnow()),
+    )
+    await db.commit()
+
+
 # ── forecasts ─────────────────────────────────────────────────────────────────
 
 async def save_forecast(
@@ -478,7 +586,7 @@ async def save_forecast(
     interval: str,
     model_type: str,
     origin_candle_id: int,
-    params: dict,   # {t_query, lambda, m, theta, min_bars, forecast_settings_id}
+    params: dict,   # band_lambda: {t_query, m, theta, min_bars}; simplex_ensemble: its own param set
     result: dict,   # {origin_date, origin_price, origin_direction, steps: {...}} — immutable
 ) -> int:
     """Persist a completed forecast; return its id."""
@@ -534,11 +642,12 @@ async def list_forecasts(
     lines up with nothing on the actual chart — see band_lambda.py:
     pool_values_and_weights docstring and project feedback 2026-08-07."""
     q = """
-        SELECT id, created_at, model_type, is_stale,
+        SELECT id, created_at, model_type,
                json_extract(result_json, '$.origin_date')         AS origin_ts,
                json_extract(result_json, '$.origin_extreme_date') AS origin_extreme_ts,
                json_extract(result_json, '$.origin_price')        AS origin_price,
-               json_extract(result_json, '$.origin_direction')    AS origin_direction
+               json_extract(result_json, '$.origin_direction')    AS origin_direction,
+               json_extract(params_json, '$.t_query')             AS t_query
         FROM forecasts
         WHERE instrument_id=? AND interval=?
     """
@@ -577,179 +686,141 @@ async def update_forecast_geometry(
     return cursor.rowcount > 0
 
 
-async def refresh_stale_flags(
+# ── band_lambda pool config ─────────────────────────────────────────────────
+# Replaces the old per-T "forecast_settings" (calibration result) rows —
+# removed 2026-09-12 along with λ-calibration itself (see memory
+# project_phase7_calibration_removed_final): T is now a free live parameter
+# on every forecast request (see sma/api/routes/forecasts.py), not something
+# that needs its own saved row, so only the POOL COMPOSITION (which doesn't
+# vary by T) still needs persisting, one row per (instrument, interval).
+
+async def get_band_lambda_pool(
     db: aiosqlite.Connection,
     instrument_id: int,
     interval: str,
-) -> int:
-    """
-    Mark forecasts as stale when the origin candle's close has diverged from
-    what it was when the forecast was saved (close_at_origin in result_json —
-    NOT origin_price: that's the zigzag pivot's EXTREME price, a different
-    bar entirely from origin_candle_id, the CONFIRMATION bar — comparing
-    against it would flag every forecast stale immediately regardless of any
-    real change. See band_lambda.py:pool_values_and_weights docstring and
-    project feedback 2026-08-07.). Returns number of rows updated.
-    """
+) -> dict | None:
     cursor = await db.execute(
-        """
-        UPDATE forecasts
-        SET is_stale = 1
-        WHERE instrument_id = ?
-          AND interval = ?
-          AND is_stale = 0
-          AND ABS(
-              json_extract(result_json, '$.close_at_origin') - (
-                  SELECT c.close FROM candles c
-                  WHERE c.id = forecasts.origin_candle_id
-              )
-          ) > 1e-9
-        """,
+        "SELECT pool_config_json FROM band_lambda_pool WHERE instrument_id=? AND interval=?",
         (instrument_id, interval),
     )
-    await db.commit()
-    return cursor.rowcount
+    row = await cursor.fetchone()
+    return json.loads(row["pool_config_json"]) if row else None
 
 
-# ── forecast settings (calibration results) ─────────────────────────────────
-
-async def upsert_forecast_settings(
+async def upsert_band_lambda_pool(
     db: aiosqlite.Connection,
     instrument_id: int,
     interval: str,
-    model_type: str,
-    t_query: float,
-    min_bars: int,
-    lambda_json: dict,
-    m: int,
-    theta: float,
     pool_config: dict,
-    pool_key: str,
-    calibration_meta: dict,
-) -> int:
-    """
-    Insert or update one calibration row, keyed by (instrument, interval,
-    model_type, t_query, pool_key) — several pool_key rows can coexist for
-    the same T (see docs/plans/band_forecast_migration_plan.md 5.1). A brand
-    new (instrument, interval, model_type, t_query) combo activates its
-    first row automatically; subsequent pool_key variants for the same T are
-    inserted inactive so an existing live forecast isn't silently redirected
-    — the user switches via activate_forecast_settings().
-    """
-    cursor = await db.execute(
-        """SELECT COUNT(*) AS n FROM forecast_settings
-           WHERE instrument_id=? AND interval=? AND model_type=? AND t_query=?""",
-        (instrument_id, interval, model_type, t_query),
-    )
-    is_new_group = (await cursor.fetchone())["n"] == 0
-
+) -> None:
     await db.execute(
         """
-        INSERT INTO forecast_settings (
-            instrument_id, interval, model_type, t_query, min_bars,
-            lambda_json, m, theta, pool_config_json, pool_key, is_active,
-            calibration_meta_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(instrument_id, interval, model_type, t_query, pool_key) DO UPDATE SET
-            min_bars              = excluded.min_bars,
-            lambda_json           = excluded.lambda_json,
-            m                     = excluded.m,
-            theta                 = excluded.theta,
-            pool_config_json      = excluded.pool_config_json,
-            calibration_meta_json = excluded.calibration_meta_json
+        INSERT INTO band_lambda_pool (instrument_id, interval, pool_config_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(instrument_id, interval) DO UPDATE SET
+            pool_config_json = excluded.pool_config_json,
+            updated_at       = excluded.updated_at
         """,
-        (
-            instrument_id, interval, model_type, t_query, min_bars,
-            json.dumps(lambda_json, ensure_ascii=False), m, theta,
-            json.dumps(pool_config, ensure_ascii=False), pool_key,
-            1 if is_new_group else 0,
-            json.dumps(calibration_meta, ensure_ascii=False),
-        ),
+        (instrument_id, interval, json.dumps(pool_config, ensure_ascii=False), _utcnow()),
     )
     await db.commit()
-    cursor = await db.execute(
-        """SELECT id FROM forecast_settings
-           WHERE instrument_id=? AND interval=? AND model_type=? AND t_query=? AND pool_key=?""",
-        (instrument_id, interval, model_type, t_query, pool_key),
-    )
-    return (await cursor.fetchone())["id"]
 
 
-def _forecast_settings_row(row: dict) -> dict:
+# ── range forecast settings (calibration results — see docs/plans/
+#    app16_range_forecast_migration_plan.md §3: no pool, no zone_geometry —
+#    UNIQUE(instrument, interval, h_steps, p, theiler) means exactly one row
+#    per combo, always active; is_active kept for future-proofing only) ────
+
+def _range_forecast_settings_row(row: dict) -> dict:
     d = dict(row)
-    d["lambda"] = json.loads(d.pop("lambda_json"))
-    d["pool_config"] = json.loads(d.pop("pool_config_json"))
+    d["params"] = json.loads(d.pop("params_json"))
+    d["feature_order"] = json.loads(d.pop("feature_order_json"))
+    d["q_read_by_level"] = json.loads(d.pop("q_read_by_level_json"))
     d["calibration_meta"] = json.loads(d.pop("calibration_meta_json"))
     d["is_active"] = bool(d["is_active"])
     return d
 
 
-async def get_forecast_settings(
-    db: aiosqlite.Connection,
-    settings_id: int,
-) -> dict | None:
-    cursor = await db.execute("SELECT * FROM forecast_settings WHERE id=?", (settings_id,))
-    row = await cursor.fetchone()
-    return _forecast_settings_row(dict(row)) if row else None
-
-
-async def get_active_forecast_settings(
+async def upsert_range_forecast_settings(
     db: aiosqlite.Connection,
     instrument_id: int,
     interval: str,
-    model_type: str,
-    t_query: float,
-) -> dict | None:
-    cursor = await db.execute(
-        """SELECT * FROM forecast_settings
-           WHERE instrument_id=? AND interval=? AND model_type=? AND t_query=? AND is_active=1""",
-        (instrument_id, interval, model_type, t_query),
-    )
-    row = await cursor.fetchone()
-    return _forecast_settings_row(dict(row)) if row else None
-
-
-async def list_forecast_settings(
-    db: aiosqlite.Connection,
-    instrument_id: int,
-    interval: str,
-    model_type: str,
-) -> list[dict]:
-    """All calibrated T / pool_key combinations — powers the quick T-selector
-    (grouped by t_query on the frontend: active row shown, others collapsed)."""
-    cursor = await db.execute(
-        """SELECT * FROM forecast_settings
-           WHERE instrument_id=? AND interval=? AND model_type=?
-           ORDER BY t_query, is_active DESC""",
-        (instrument_id, interval, model_type),
-    )
-    return [_forecast_settings_row(dict(r)) for r in await cursor.fetchall()]
-
-
-async def activate_forecast_settings(
-    db: aiosqlite.Connection,
-    settings_id: int,
-) -> bool:
-    """Make settings_id the active row for its (instrument, interval,
-    model_type, t_query) group; deactivate every sibling pool_key."""
-    row = await get_forecast_settings(db, settings_id)
-    if row is None:
-        return False
+    h_steps: int,
+    p: int,
+    theiler: int,
+    params: dict,
+    feature_order: list,
+    q_read_by_level: dict,
+    calibration_meta: dict,
+) -> int:
+    """Insert or replace the ONE calibration row for (instrument, interval,
+    h_steps, p, theiler) — re-calibrating the same combo overwrites it."""
     await db.execute(
-        """UPDATE forecast_settings SET is_active=0
-           WHERE instrument_id=? AND interval=? AND model_type=? AND t_query=?""",
-        (row["instrument_id"], row["interval"], row["model_type"], row["t_query"]),
+        """
+        INSERT INTO range_forecast_settings (
+            instrument_id, interval, h_steps, p, theiler,
+            params_json, feature_order_json, q_read_by_level_json,
+            calibration_meta_json, is_active
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT(instrument_id, interval, h_steps, p, theiler) DO UPDATE SET
+            params_json           = excluded.params_json,
+            feature_order_json    = excluded.feature_order_json,
+            q_read_by_level_json  = excluded.q_read_by_level_json,
+            calibration_meta_json = excluded.calibration_meta_json
+        """,
+        (
+            instrument_id, interval, h_steps, p, theiler,
+            json.dumps(params, ensure_ascii=False), json.dumps(feature_order, ensure_ascii=False),
+            json.dumps(q_read_by_level, ensure_ascii=False), json.dumps(calibration_meta, ensure_ascii=False),
+        ),
     )
-    await db.execute("UPDATE forecast_settings SET is_active=1 WHERE id=?", (settings_id,))
     await db.commit()
-    return True
+    cursor = await db.execute(
+        """SELECT id FROM range_forecast_settings
+           WHERE instrument_id=? AND interval=? AND h_steps=? AND p=? AND theiler=?""",
+        (instrument_id, interval, h_steps, p, theiler),
+    )
+    return (await cursor.fetchone())["id"]
 
 
-async def delete_forecast_settings(
+async def get_range_forecast_settings(
+    db: aiosqlite.Connection,
+    instrument_id: int,
+    interval: str,
+    h_steps: int,
+    p: int,
+    theiler: int,
+) -> dict | None:
+    cursor = await db.execute(
+        """SELECT * FROM range_forecast_settings
+           WHERE instrument_id=? AND interval=? AND h_steps=? AND p=? AND theiler=? AND is_active=1""",
+        (instrument_id, interval, h_steps, p, theiler),
+    )
+    row = await cursor.fetchone()
+    return _range_forecast_settings_row(dict(row)) if row else None
+
+
+async def list_range_forecast_settings(
+    db: aiosqlite.Connection,
+    instrument_id: int,
+    interval: str,
+) -> list[dict]:
+    """All calibrated (h_steps, p, theiler) combinations for this ticker —
+    powers the settings list UI ("уже калибровано под H=5/p=8/theiler=5...")."""
+    cursor = await db.execute(
+        """SELECT * FROM range_forecast_settings
+           WHERE instrument_id=? AND interval=?
+           ORDER BY h_steps, p, theiler""",
+        (instrument_id, interval),
+    )
+    return [_range_forecast_settings_row(dict(r)) for r in await cursor.fetchall()]
+
+
+async def delete_range_forecast_settings(
     db: aiosqlite.Connection,
     settings_id: int,
 ) -> bool:
-    cursor = await db.execute("DELETE FROM forecast_settings WHERE id=?", (settings_id,))
+    cursor = await db.execute("DELETE FROM range_forecast_settings WHERE id=?", (settings_id,))
     await db.commit()
     return cursor.rowcount > 0
 
@@ -852,6 +923,9 @@ async def list_display_presets(
     for r in rows:
         r["levels"] = json.loads(r.pop("levels_json"))
         r["is_default"] = bool(r["is_default"])
+        r["show_zones"] = bool(r["show_zones"])
+        r["show_trade_level"] = bool(r["show_trade_level"])
+        r["trim_zone1"] = bool(r["trim_zone1"])
     return rows
 
 
@@ -862,6 +936,10 @@ async def save_display_preset(
     levels: list[float],
     opacity: float,
     is_default: bool = False,
+    trade_level_pct: float = 70,
+    show_zones: bool = True,
+    show_trade_level: bool = True,
+    trim_zone1: bool = False,
 ) -> int:
     """Insert or update by (model_type, name). At most one default preset per
     model_type — setting is_default clears it on every other preset of the
@@ -873,14 +951,24 @@ async def save_display_preset(
         )
     await db.execute(
         """
-        INSERT INTO display_presets (model_type, name, levels_json, opacity, is_default, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO display_presets (
+            model_type, name, levels_json, opacity, is_default, created_at,
+            trade_level_pct, show_zones, show_trade_level, trim_zone1
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(model_type, name) DO UPDATE SET
-            levels_json = excluded.levels_json,
-            opacity     = excluded.opacity,
-            is_default  = excluded.is_default
+            levels_json      = excluded.levels_json,
+            opacity          = excluded.opacity,
+            is_default       = excluded.is_default,
+            trade_level_pct  = excluded.trade_level_pct,
+            show_zones       = excluded.show_zones,
+            show_trade_level = excluded.show_trade_level,
+            trim_zone1       = excluded.trim_zone1
         """,
-        (model_type, name, json.dumps(levels), opacity, 1 if is_default else 0, _utcnow()),
+        (
+            model_type, name, json.dumps(levels), opacity, 1 if is_default else 0, _utcnow(),
+            trade_level_pct, 1 if show_zones else 0, 1 if show_trade_level else 0, 1 if trim_zone1 else 0,
+        ),
     )
     await db.commit()
     cursor = await db.execute(
@@ -1001,16 +1089,30 @@ async def list_tasks(
     return result
 
 
+async def delete_task(db: aiosqlite.Connection, task_id: int) -> bool:
+    """
+    Manual delete for one task row — terminal states only (see
+    sma/api/routes/tasks.py, which rejects pending/running before calling
+    this). Unlike prune_old_done_tasks (auto, 'done' only, keeps the last
+    N), cancelled/interrupted/error rows are never auto-pruned — without
+    this they'd accumulate forever (reported 2026-09-12: a cancelled task
+    had no way to be removed from the list).
+    """
+    cursor = await db.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+    await db.commit()
+    return cursor.rowcount > 0
+
+
 async def prune_old_done_tasks(db: aiosqlite.Connection, keep: int = 10) -> int:
     """
     Deletes 'done' task rows beyond the most recent `keep` (by updated_at,
     id as tie-break — updated_at has only second resolution, so a batch of
-    tasks finishing within the same second, e.g. a pool calibration's
+    tasks finishing within the same second, e.g. a pool save's batch of
     candle_fetch tasks, would otherwise sort ambiguously and could evict the
     wrong rows; id DESC is a stable, deterministic proxy for "more recent"
     among ties since ids only ever increase). The task queue is a transient
     work log, not a history store — whatever a task actually produced
-    already lives in its own table (forecasts, forecast_settings, candles);
+    already lives in its own table (forecasts, band_lambda_pool, candles);
     a pretest's summary was never persisted anywhere besides the task's own
     terminal WS message in the first place. So dropping old completed task
     rows loses nothing. Only 'done' rows are touched — error/cancelled/
@@ -1041,30 +1143,119 @@ async def prune_old_done_tasks(db: aiosqlite.Connection, keep: int = 10) -> int:
 # existed.
 DEFAULT_MOEX_POOL_WORKERS = 16
 DEFAULT_CALIBRATION_WORKERS = 0  # 0 = auto
+DEFAULT_CHART_WINDOW_BARS = 1000  # sma/ui/candle_window.js — bars kept loaded on the main chart at once; 1000 confirmed noticeably smoother in Firefox than the initial 3000
+
+# Colour profile (docs/plans/frontend_improvements_plan.md §1.1a, expanded
+# 2026-08-25 to cover every tool-meaningful color in the app — project
+# feedback: "можно расширить и позволить вообще все используемые
+# инструментами цвета настраивать") — fixed, named roles (not one entry per
+# user-created object: one price-level color for ALL levels, one palette
+# cycled by index for ALL MA/zigzag_tool series, etc.). Values here are
+# exactly the hardcoded colors each frontend module used before this existed
+# (or before its role was added) — so a fresh install renders identically to
+# before the profile existed, only now overridable from the left panel's
+# "Цветовой профиль" section (sma/ui/settings.js — see COLOR_ROLES there for
+# the single source of truth on label/grouping; keys here and there MUST
+# match). "Chrome" colors (backgrounds, grid lines, borders, legend/tooltip
+# styling) are deliberately NOT roles — only colors that carry analytical
+# meaning (direction, series identity, model identity) are.
+DEFAULT_COLOR_PROFILE: dict[str, Any] = {
+    # ── Основной график ──
+    "price_level": "#ff0000",
+    "next_origin_marker": "#58a6ff",
+    "trend_ruler_line": "#1f77b4",
+    "trend_ruler_origin": "#bc8cff",
+    "trend_ruler_accel_up": "#2ca02c",
+    "trend_ruler_accel_down": "#d62728",
+    "trend_ruler_accel_line": "#7f7f7f",
+    "ma_palette": ["#f0883e", "#a5d6ff", "#d2a8ff", "#7ee787", "#ffa198", "#79c0ff"],
+    "zigzag_tool_palette": ["#d29922", "#f0883e", "#a5d6ff", "#7ee787", "#ffa198", "#d2a8ff"],
+    "forecast_zigzag": "#d29922",
+    "band_zone_up": "#3fb950",
+    "band_zone_down": "#f85149",
+    "candle_up": "#3fb950",
+    "candle_down": "#f85149",
+    "forecast_marker_selected": "#ffd600",
+    "forecast_marker_pinned_band_lambda": "#58a6ff",
+    "forecast_marker_pinned_simplex_ensemble": "#f0883e",
+    "forecast_marker_pinned_regime_mixture_potential": "#d2a8ff",
+    "simplex_origin_lines": "#64b4ff",
+    "simplex_mean_band": "#ffd600",
+    "range_forecast_line": "#ffd600",
+    "risk_corridor_close": "#ffffff",
+    "risk_corridor_high": "#26a69a",
+    "risk_corridor_low": "#ef5350",
+    # ── Осциллятор ──
+    "spectrogram_colorscale": "Viridis",
+    "spectrogram_cutoff_line": "#ff5050",
+    "variance_slope_up": "#2ca02c",
+    "variance_slope_down": "#d62728",
+    "variance_var": "#9467bd",
+    "volume_up": "#3fb950",
+    "volume_down": "#f85149",
+}
+
+
+def _parse_color_profile(raw: str | None) -> dict:
+    """Merge stored JSON over the defaults so a NEW role added later (e.g. a
+    future forecast model) always has a value even for rows saved before it
+    existed — never crashes/omits a key just because an old row predates it."""
+    stored = {}
+    if raw:
+        try:
+            stored = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            stored = {}
+    return {**DEFAULT_COLOR_PROFILE, **stored}
 
 
 async def get_app_settings(db: aiosqlite.Connection) -> dict:
-    cursor = await db.execute("SELECT moex_pool_workers, calibration_workers FROM app_settings WHERE id = 1")
+    cursor = await db.execute(
+        "SELECT moex_pool_workers, calibration_workers, chart_window_bars, color_profile_json FROM app_settings WHERE id = 1"
+    )
     row = await cursor.fetchone()
     if row is None:
         return {
             "moex_pool_workers": DEFAULT_MOEX_POOL_WORKERS,
             "calibration_workers": DEFAULT_CALIBRATION_WORKERS,
+            "chart_window_bars": DEFAULT_CHART_WINDOW_BARS,
+            "color_profile": dict(DEFAULT_COLOR_PROFILE),
         }
-    return {"moex_pool_workers": row["moex_pool_workers"], "calibration_workers": row["calibration_workers"]}
+    return {
+        "moex_pool_workers": row["moex_pool_workers"],
+        "calibration_workers": row["calibration_workers"],
+        "chart_window_bars": row["chart_window_bars"],
+        "color_profile": _parse_color_profile(row["color_profile_json"]),
+    }
 
 
-async def save_app_settings(db: aiosqlite.Connection, moex_pool_workers: int, calibration_workers: int) -> dict:
+async def save_app_settings(
+    db: aiosqlite.Connection,
+    moex_pool_workers: int,
+    calibration_workers: int,
+    chart_window_bars: int,
+    color_profile: dict | None = None,
+) -> dict:
+    # color_profile=None means "leave whatever is already stored alone" —
+    # save_app_settings is also called from the moex/calibration-workers
+    # form (settings.js), which never sends a color profile and must not
+    # blow the stored one away with defaults.
+    if color_profile is None:
+        existing = await get_app_settings(db)
+        color_profile = existing["color_profile"]
+    profile_json = json.dumps({**DEFAULT_COLOR_PROFILE, **color_profile})
     await db.execute(
         """
-        INSERT INTO app_settings (id, moex_pool_workers, calibration_workers, updated_at)
-        VALUES (1, ?, ?, ?)
+        INSERT INTO app_settings (id, moex_pool_workers, calibration_workers, chart_window_bars, color_profile_json, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             moex_pool_workers   = excluded.moex_pool_workers,
             calibration_workers = excluded.calibration_workers,
+            chart_window_bars   = excluded.chart_window_bars,
+            color_profile_json  = excluded.color_profile_json,
             updated_at          = excluded.updated_at
         """,
-        (moex_pool_workers, calibration_workers, datetime.now(timezone.utc).isoformat()),
+        (moex_pool_workers, calibration_workers, chart_window_bars, profile_json, datetime.now(timezone.utc).isoformat()),
     )
     await db.commit()
     return await get_app_settings(db)

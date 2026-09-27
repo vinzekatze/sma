@@ -16,6 +16,10 @@ class DisplayPresetIn(BaseModel):
     levels: list[float]
     opacity: float = 0.5
     is_default: bool = False
+    trade_level_pct: float = 70
+    show_zones: bool = True
+    show_trade_level: bool = True
+    trim_zone1: bool = False
 
 
 @router.get("")
@@ -35,6 +39,7 @@ async def create_display_preset(
     it rather than creating a duplicate."""
     preset_id = await save_display_preset(
         db, body.model_type, body.name, body.levels, body.opacity, body.is_default,
+        body.trade_level_pct, body.show_zones, body.show_trade_level, body.trim_zone1,
     )
     return {"id": preset_id}
 

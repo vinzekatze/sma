@@ -1,7 +1,9 @@
 import { S } from './state.js';
 import { api, setStatus } from './api.js';
 import { renderChart, futureDateAt, paperY } from './chart.js';
-import { registerTool } from './tools.js';
+import { registerTool, isToolObjectVisible } from './tools.js';
+import { getToolShowOnChart, saveToolShowOnChart } from './local_prefs.js';
+import { hexToRgbTriplet, hexToRgba } from './color_utils.js';
 
 // ── trend_ruler analyzer (Основной график tab) ──────────────────────────
 // Main-chart half of what used to be a single combined "trend_variance"
@@ -232,7 +234,12 @@ function readTrendRulerSettings() {
     extendBands:     document.getElementById('tr-extend-bands').checked,
     extendBorders:   document.getElementById('tr-extend-borders').checked,
     nFuture:         +document.getElementById('tr-n-future').value,
-    showOnChart:     document.getElementById('tr-show-chart').checked,
+    // No longer a form field — toggled independently by the eye button in
+    // the panel header (toggleTrendRulerShowChart), see §2.6 of
+    // docs/plans/frontend_improvements_plan.md. Sourced from current state
+    // so it survives every OTHER settings change reassigning
+    // S.trendRulerSettings wholesale below.
+    showOnChart:     S.trendRulerSettings.showOnChart,
     showAccelFan:    document.getElementById('tr-show-accel-fan').checked,
     mAccel:          +document.getElementById('tr-m-accel').value,
     nAccel:          +document.getElementById('tr-n-accel').value,
@@ -251,12 +258,32 @@ function applyTrendRulerSettings(p) {
   document.getElementById('tr-extend-bands').checked = !!p.extendBands;
   document.getElementById('tr-extend-borders').checked = p.extendBorders !== false;
   document.getElementById('tr-n-future').value = p.nFuture;
-  document.getElementById('tr-show-chart').checked = !!p.showOnChart;
   document.getElementById('tr-show-accel-fan').checked = !!p.showAccelFan;
   document.getElementById('tr-m-accel').value = p.mAccel;
   document.getElementById('tr-n-accel').value = p.nAccel;
   S.trendRulerSettings = { ...p, bands: [...p.bands] };
   renderBandsList();
+  updateShowChartButton();
+}
+
+// Eye-icon toggle in the panel header (replaces the old "Показывать на
+// графике" checkbox at the bottom of the panel, project feedback
+// 2026-08-20, §2.6 of docs/plans/frontend_improvements_plan.md) — now means
+// "закреплено": stays visible even while this tool ISN'T the active one
+// (see buildTrendRulerMainTraces/buildTrendRulerOriginShape below, which OR
+// it with S.activeMainTool === 'trend_ruler' so the live preview is always
+// visible while actually configuring it, pinned or not).
+export function toggleTrendRulerShowChart() {
+  S.trendRulerSettings.showOnChart = !S.trendRulerSettings.showOnChart;
+  updateShowChartButton();
+  redraw();
+  saveTrendRulerSettings();
+  saveToolShowOnChart('trend_ruler', S.trendRulerSettings.showOnChart); // global, survives a reload/ticker switch — project feedback 2026-08-20, see local_prefs.js
+}
+
+function updateShowChartButton() {
+  document.getElementById('tr-show-chart-btn')
+    ?.classList.toggle('active', !!S.trendRulerSettings.showOnChart);
 }
 
 // Last-used settings for this (instrument, interval) — same mechanism as
@@ -335,9 +362,27 @@ export function resetTrendRulerOrigin() {
 
 // Called once after candles (re)load (app.js:loadCandles) — populates the
 // live preview immediately regardless of showOnChart (cheap, no request).
+// showOnChart is then OVERRIDDEN by the global localStorage flag (project
+// feedback 2026-08-20: pinned/unpinned should be a standing preference
+// across tickers/reloads, not per-ticker DB state — see local_prefs.js) —
+// runs AFTER loadTrendRulerDefaults() already applied whatever this
+// ticker's own analysis_settings row happened to have, so the global
+// preference always wins for THIS one field.
 export function initTrendRulerForTicker() {
   renderBandsList(); // reflects state.js defaults even when nothing was persisted yet
+  S.trendRulerSettings.showOnChart = getToolShowOnChart('trend_ruler', S.trendRulerSettings.showOnChart);
   onTrendRulerSettingsChange();
+  updateShowChartButton();
+}
+
+// Visibility policy (project feedback 2026-08-20, §2.6 of
+// docs/plans/frontend_improvements_plan.md): drawn when EITHER pinned
+// (showOnChart, toggled by the eye button) OR this tool is the one
+// currently active in the toolbar — so configuring it always shows a live
+// preview even before you've decided to pin it, and pinning keeps it up
+// once you switch to something else.
+function isTrendRulerVisible() {
+  return isToolObjectVisible('trend_ruler', S.trendRulerSettings.showOnChart);
 }
 
 // ── registry entry: main-chart traces + origin shape (moved out of
@@ -364,12 +409,13 @@ export function initTrendRulerForTicker() {
 // per-band gradient.
 function buildTrendRulerMainTraces() {
   const d = S.trendRulerData;
-  if (!d || !S.trendRulerSettings.showOnChart) return [];
+  if (!d || !isTrendRulerVisible()) return [];
 
   const traces = [];
   const trend = d.trend;
   const { showBands, showBandBorders, bandOpacity, extendBands, extendBorders } = S.trendRulerSettings;
-  const BAND_COLOR = '31,119,180'; // #1f77b4, matches the trend line
+  const lineColor = S.colorProfile.trend_ruler_line; // "Линия тренд-линейки" role — settings.js
+  const BAND_COLOR = hexToRgbTriplet(lineColor); // bands share the trend line's own color
 
   if (showBands) {
     d.bands.forEach(b => {
@@ -401,7 +447,7 @@ function buildTrendRulerMainTraces() {
   traces.push({
     type: 'scatter', mode: 'lines', name: 'тренд окна',
     x: trend.times, y: trend.price,
-    line: { color: '#1f77b4', width: 2.5 },
+    line: { color: lineColor, width: 2.5 },
   });
 
   // Dashed continuation past the window — linear extrapolation of the
@@ -413,8 +459,7 @@ function buildTrendRulerMainTraces() {
   // see computeLivePreview).
   if (d.extension && (extendBands || extendBorders)) {
     const ext = d.extension;
-    const originDate = d.origin_date.slice(0, 10);
-    const extTimes = Array.from({ length: ext.n_future + 1 }, (_, h) => futureDateAt(originDate, h, S.interval));
+    const extTimes = Array.from({ length: ext.n_future + 1 }, (_, h) => futureDateAt(d.origin_date, h, S.interval, S.candles));
     if (extendBands) {
       ext.bands.forEach(b => {
         traces.push({
@@ -446,7 +491,10 @@ function buildTrendRulerMainTraces() {
   // strictly WITHIN the window (not a forecast either — see accel_fan
   // computation in trend_variance.py).
   if (d.accel_fan) {
-    const fillColor = d.accel_fan.direction === 'up' ? 'rgba(44,160,44,0.25)' : 'rgba(214,39,40,0.25)';
+    const fillColor = hexToRgba(
+      d.accel_fan.direction === 'up' ? S.colorProfile.trend_ruler_accel_up : S.colorProfile.trend_ruler_accel_down,
+      0.25,
+    );
     traces.push({
       type: 'scatter', mode: 'lines', x: trend.times, y: trend.price,
       line: { width: 0 }, showlegend: false, hoverinfo: 'skip',
@@ -454,7 +502,7 @@ function buildTrendRulerMainTraces() {
     traces.push({
       type: 'scatter', mode: 'lines', name: 'тренд + n·ускорение',
       x: trend.times, y: d.accel_fan.price,
-      line: { color: '#7f7f7f', width: 1.5, dash: 'dot' },
+      line: { color: S.colorProfile.trend_ruler_accel_line, width: 1.5, dash: 'dot' },
       fill: 'tonexty', fillcolor: fillColor,
     });
   }
@@ -464,14 +512,15 @@ function buildTrendRulerMainTraces() {
 
 // Vertical crosshair at this analyzer's OWN clicked origin (only when
 // showOnChart AND an explicit origin was picked — "live" mode has nothing
-// to point at, it's just always the last bar). Distinct color from the
-// Прогноз tab's origin line (#58a6ff) so the two are never mistaken.
+// to point at, it's just always the last bar). Own configurable role
+// (trend_ruler_origin) distinct from the Прогноз tab's origin line
+// (next_origin_marker) so the two are never mistaken.
 function buildTrendRulerOriginShape() {
-  if (!S.trendRulerSettings.showOnChart || !S.trendRulerOriginTs) return [];
+  if (!isTrendRulerVisible() || !S.trendRulerOriginTs) return [];
   const [y0, y1] = paperY();
   return [{
     type: 'line', x0: S.trendRulerOriginTs, x1: S.trendRulerOriginTs, y0, y1, yref: 'paper',
-    line: { color: '#bc8cff', width: 1, dash: 'dash' },
+    line: { color: S.colorProfile.trend_ruler_origin, width: 1, dash: 'dash' },
   }];
 }
 

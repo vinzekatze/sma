@@ -90,10 +90,11 @@ async def list_candles(
     interval: str = Query(...),
     since: Optional[str] = Query(None),
     until: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None, ge=1, description="last N bars matching since/until — sma/ui/candle_window.js"),
     db: aiosqlite.Connection = Depends(get_db),
 ):
     instr = await get_instrument(db, ticker, data_source)
     if instr is None:
         raise HTTPException(404, f"Instrument {ticker}/{data_source} not found")
-    rows = await get_candles(db, instr["id"], interval, since=since, until=until)
+    rows = await get_candles(db, instr["id"], interval, since=since, until=until, limit=limit)
     return rows

@@ -24,20 +24,21 @@
 import { S, DAY_RU } from './state.js';
 import { api, setIdle } from './api.js';
 import { renderChart } from './chart.js';
-import { activateTool } from './tools.js';
+import { activateTool, syncDisplayPeek } from './tools.js';
 import { iconHtml } from './icons.js';
+import { savePinnedForecastIds } from './local_prefs.js';
 
 // Every model this history/results system knows about — kept as a small
 // local list (not derived from tools.js's TOOLS, which also holds
 // non-forecast tools) since this file only ever needs the two model_type
 // strings themselves, to fetch/render one history+results pair per model.
-const MODEL_TYPES = ['band_lambda', 'simplex_ensemble'];
+const MODEL_TYPES = ['band_lambda', 'simplex_ensemble', 'regime_mixture_potential'];
 
 const _modelHandlers = {}; // modelType -> {onSelected(f)}
 
 // Registered once at startup (app.js) — e.g. band_lambda wants selecting one
-// of its forecasts to also update S.selectedTs/activeSettingsId and reload
-// the zigzag overlay; simplex_ensemble wants its params form refilled.
+// of its forecasts to also update S.selectedTs/model params and reload the
+// zigzag overlay; simplex_ensemble wants its params form refilled.
 export function registerModelHandlers(modelType, handlers) {
   _modelHandlers[modelType] = handlers;
 }
@@ -63,7 +64,7 @@ export async function refreshHistory() {
         id: f.id, model_type: f.model_type,
         origin_ts: f.origin_ts, origin_extreme_ts: f.origin_extreme_ts,
         origin_price: f.origin_price,
-        origin_direction: f.origin_direction, is_stale: !!f.is_stale, created_at: f.created_at,
+        origin_direction: f.origin_direction, t_query: f.t_query, created_at: f.created_at,
       }));
     } catch (_) {
       return [];
@@ -71,6 +72,41 @@ export async function refreshHistory() {
   }));
   S.historyForecasts = perModel.flat();
   for (const modelType of MODEL_TYPES) renderHistoryList(modelType);
+}
+
+// The list rows refreshHistory() fetches are deliberately lightweight (no
+// result/zone_geometry — see the GET /forecasts query above) — the actual
+// band/zone overlay (buildVisibleOverlays in chart.js) needs the FULL
+// GET /forecasts/{id} payload, which normally only gets fetched+cached into
+// S.renderedForecasts when a forecast is explicitly opened
+// (loadAndRenderForecast below). A pinned forecast's id survives a page
+// reload / ticker switch (S.pinnedForecastIds, localStorage) but
+// S.renderedForecasts does NOT — it's cleared on ticker switch (app.js) and
+// starts empty on a fresh page load — so a pin that was never re-opened this
+// session had nothing for buildVisibleOverlays to draw: the marker showed
+// (pure function of S.historyForecasts + S.pinnedForecastIds) but the band
+// itself silently didn't (project feedback 2026-08-25: "закрепленные...
+// прогнозы... не отображаются после перезагрузки страницы / загрузки
+// тикера"). Called from app.js's loadCandles right after refreshHistory(),
+// so every currently-pinned id that's present in the freshly loaded history
+// gets its full data fetched once and cached, same cache
+// loadAndRenderForecast reads from — re-selecting/re-pinning it afterward
+// costs nothing extra.
+export async function hydratePinnedForecasts() {
+  const ids = [...S.pinnedForecastIds].filter(id =>
+    !S.renderedForecasts.has(id) && S.historyForecasts.some(f => f.id === id)
+  );
+  await Promise.all(ids.map(async id => {
+    try {
+      const f = await api('GET', `/forecasts/${id}`);
+      S.renderedForecasts.set(id, {
+        model_type: f.model_type, result: f.result, params: f.params, zone_geometry: f.zone_geometry,
+      });
+    } catch (_) {
+      // stale/deleted pinned forecast — leave unrendered, harmless (same as
+      // any other id in S.pinnedForecastIds absent from S.historyForecasts)
+    }
+  }));
 }
 
 function renderHistoryList(modelType) {
@@ -90,16 +126,16 @@ function renderHistoryList(modelType) {
     const active = f.id === S.selectedForecastId ? ' style="background:rgba(88,166,255,0.08)"' : '';
     const dir = f.origin_direction > 0 ? '▲' : '▼';
     const pinned = S.pinnedForecastIds.has(f.id);
+    const tLabel = f.t_query != null ? ` · T=${(f.t_query * 100).toFixed(0)}%` : '';
     return `
       <div class="hist-item" onclick="loadAndRenderForecast(${f.id})"${active}>
         <div class="hist-item-header">
           <span class="hist-date">${originDay}</span>
-          ${f.is_stale ? '<span class="hist-stale">⚠ устарел</span>' : ''}
           <button class="hist-eye-btn${pinned ? ' active' : ''}" onclick="toggleForecastPin(${f.id}, event)"
             title="${pinned ? 'Снять с отображения' : 'Закрепить на графике (показывать вместе с другими)'}">${iconHtml('eye')}</button>
           <button class="hist-del-btn" onclick="deleteForecast(${f.id}, event)" title="Удалить">${iconHtml('close')}</button>
         </div>
-        <div><span class="hist-price">${dir} ${f.origin_price.toFixed(4)}</span></div>
+        <div><span class="hist-price">${dir} ${f.origin_price.toFixed(4)}${tLabel}</span></div>
         <div style="color:var(--muted);font-size:10px">${(f.created_at || '').slice(0, 16).replace('T', ' ')}</div>
       </div>
     `;
@@ -134,6 +170,7 @@ export async function loadAndRenderForecast(forecastId, { switchTool = true } = 
     S.originTs = f.result.origin_date.slice(0, 10);
 
     if (switchTool) activateTool(f.model_type); // show the owning model's panel (toolbar tool, not just a display div)
+    syncDisplayPeek(); // activateTool above already triggers this via renderToolbar, but the switchTool:false path (a marker click while already in object_select) doesn't call activateTool at all
     await _modelHandlers[f.model_type]?.onSelected?.(f);
 
     await refreshHistory();
@@ -145,6 +182,19 @@ export async function loadAndRenderForecast(forecastId, { switchTool = true } = 
   }
 }
 
+// Which results panel a forecast of the given model_type currently renders
+// into — 'object_select' while that cursor tool is active (round 8: a
+// marker click must never switch tools, so browsing must stay inside
+// object_select's own panel), otherwise the model's own panel. Shared by
+// showResultsFor (which panel to fill) and toggleForecastPin (which panel's
+// eye button, id `results-pin-btn-${target}`, needs its 'active' class
+// synced — every model's results header now has one, project feedback
+// 2026-08-25: "не хватает иконки глазика рядом с 'Результат', как в режиме
+// 'выбор объектов'" — previously only object_select had it).
+function resultsTargetFor(modelType) {
+  return S.activeMainTool === 'object_select' ? 'object_select' : modelType;
+}
+
 // Renders into the CURRENTLY ACTIVE tool's own results area — normally
 // that's the forecast's own model_type (switchTool just activated it, or
 // it was already active), but while 'object_select' is the active tool
@@ -153,16 +203,16 @@ export async function loadAndRenderForecast(forecastId, { switchTool = true } = 
 // see index.html) so inspecting a forecast never requires leaving
 // object_select mode.
 function showResultsFor(f) {
-  const target = S.activeMainTool === 'object_select' ? 'object_select' : f.model_type;
+  const target = resultsTargetFor(f.model_type);
   const content = document.getElementById(`results-${target}`);
   const section = document.getElementById(`results-section-${target}`);
   if (!content || !section) return;
-  content.innerHTML = f.model_type === 'simplex_ensemble' ? _simplexResultsHtml(f) : _bandResultsHtml(f);
+  content.innerHTML = f.model_type === 'simplex_ensemble' ? _simplexResultsHtml(f)
+    : f.model_type === 'regime_mixture_potential' ? _potentialResultsHtml(f)
+    : _bandResultsHtml(f);
   section.style.display = '';
-  if (target === 'object_select') {
-    document.getElementById('object-select-pin-btn')
-      ?.classList.toggle('active', S.pinnedForecastIds.has(S.selectedForecastId));
-  }
+  document.getElementById(`results-pin-btn-${target}`)
+    ?.classList.toggle('active', S.pinnedForecastIds.has(S.selectedForecastId));
 }
 
 function _bandResultsHtml(f) {
@@ -184,6 +234,10 @@ function _bandResultsHtml(f) {
   };
 
   return `
+    <div class="result-row">
+      <span class="result-key">T (порог зигзага)</span>
+      <span class="result-val">${(f.params.t_query * 100).toFixed(0)}%</span>
+    </div>
     <div class="result-row">
       <span class="result-key">Событие (origin)</span>
       <span class="result-val ${dirClass}">${r.origin_price.toFixed(4)}  ${dirLabel}</span>
@@ -232,11 +286,54 @@ function _simplexResultsHtml(f) {
   `;
 }
 
-// "Eye" toggle — session-only pin (NOT persisted to DB, by design — see
-// plan). event is optional — history-row eye buttons pass it (needed to
-// stopPropagation so the row's own onclick doesn't ALSO fire); the
-// standalone object_select panel's pin button (not nested inside a
-// clickable row) calls toggleSelectedForecastPin below instead, which has
+const REGIME_LABELS = { 0: 'низкая', 1: 'средняя', 2: 'высокая', '-1': 'н/д' };
+
+function _potentialResultsHtml(f) {
+  const r = f.result;
+  const dirLabel = r.origin_direction > 0 ? '▲ вверх' : '▼ вниз';
+  const dirClass = r.origin_direction > 0 ? 'up' : 'down';
+  const main = r.snapshots[0]; // самый свежий (rewind_idx=0) — см. regime_mixture_potential.py
+  const topH = main.components_by_h.at(-1);
+  const dominant = topH.reduce((a, b) => (b[2] > a[2] ? b : a));
+  return `
+    <div class="result-row">
+      <span class="result-key">Origin</span>
+      <span class="result-val ${dirClass}">${r.origin_price.toFixed(4)}  ${dirLabel}</span>
+    </div>
+    <div class="result-row">
+      <span class="result-key">Дата origin</span>
+      <span class="result-val">${r.origin_date.slice(0, 10)}</span>
+    </div>
+    <div class="result-row">
+      <span class="result-key">Премотка</span>
+      <span class="result-val">${r.n_forecasts} прогноз(ов)  ·  шаг ${r.rewind_step}</span>
+    </div>
+    <div class="result-row">
+      <span class="result-key">Режим волатильности</span>
+      <span class="result-val">${REGIME_LABELS[main.cur_regime] ?? '?'}${main.regime_used ? '' : ' (fallback на полный пул)'}</span>
+    </div>
+    <div class="result-row">
+      <span class="result-key">Доминантный сценарий (h=${r.horizon})</span>
+      <span class="result-val">${dominant[2] * 100 | 0}%  @ ${dominant[0].toFixed(4)}</span>
+    </div>
+    ${r.skipped?.length ? `
+    <div class="result-row">
+      <span class="result-key">Пропущено origin премотки</span>
+      <span class="result-val muted-val">${r.skipped.length}</span>
+    </div>` : ''}
+  `;
+}
+
+// "Eye" toggle — session-only pin (NOT persisted to the DB, by design — see
+// plan). Persisted to localStorage instead (§1.1b of docs/plans/
+// frontend_improvements_plan.md) — see local_prefs.js's docstring for the
+// caveat that this currently only has a visible effect before the next
+// app.js:loadCandles call, which unconditionally clears pins per ticker.
+// event is optional — history-row eye buttons pass it (needed to
+// stopPropagation so the row's own onclick doesn't ALSO fire); every
+// results-panel pin button (not nested inside a clickable row — object_select
+// AND, as of project feedback 2026-08-25, every model's own "Результат"
+// header too) calls toggleSelectedForecastPin below instead, which has
 // nothing to stop propagating to.
 export function toggleForecastPin(id, event) {
   event?.stopPropagation();
@@ -244,9 +341,15 @@ export function toggleForecastPin(id, event) {
   else S.pinnedForecastIds.add(id);
   refreshHistory();
   renderChart({ preserveRange: true });
-  if (S.activeMainTool === 'object_select' && S.selectedForecastId === id) {
-    document.getElementById('object-select-pin-btn')?.classList.toggle('active', S.pinnedForecastIds.has(id));
+  if (S.selectedForecastId === id) {
+    const modelType = S.historyForecasts.find(f => f.id === id)?.model_type
+      || S.renderedForecasts.get(id)?.model_type;
+    if (modelType) {
+      document.getElementById(`results-pin-btn-${resultsTargetFor(modelType)}`)
+        ?.classList.toggle('active', S.pinnedForecastIds.has(id));
+    }
   }
+  savePinnedForecastIds(S.pinnedForecastIds); // §1.1b
 }
 
 // Pins/unpins whatever forecast is currently selected — the object_select
@@ -266,8 +369,10 @@ export async function deleteForecast(id, event) {
     await api('DELETE', `/forecasts/${id}`);
     S.renderedForecasts.delete(id);
     S.pinnedForecastIds.delete(id);
+    savePinnedForecastIds(S.pinnedForecastIds); // §1.1b — deleted forecast can't stay a stale pin in localStorage
     if (S.selectedForecastId === id) {
       S.selectedForecastId = null;
+      syncDisplayPeek();
       if (modelType) {
         const section = document.getElementById(`results-section-${modelType}`);
         if (section) section.style.display = 'none';

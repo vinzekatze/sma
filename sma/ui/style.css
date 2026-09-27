@@ -37,7 +37,7 @@
   /* Numeric/mono stack — reserved for actual numbers (inputs, table cells,
      result values): a data/instrument-panel register distinct from the UI
      sans, tabular figures so columns of numbers align. */
-  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', 'Liberation Mono', 'DejaVu Sans Mono', monospace;
 
   --transition-fast: 120ms ease;
 }
@@ -47,7 +47,12 @@
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  /* A neutral, OS-native stack instead of Apple/Windows-specific names
+     (-apple-system/BlinkMacSystemFont) — those two are simply absent on
+     Linux, so Chrome and Firefox each fell through to a DIFFERENT default
+     sans-serif there (project feedback: "разные шрифты в фоксе и хроме").
+     system-ui resolves to the same installed OS font in both engines. */
+  font-family: system-ui, 'Segoe UI', Roboto, 'Noto Sans', 'Liberation Sans', Arial, sans-serif;
   font-size: 13px;
   height: 100vh;
   overflow: hidden;
@@ -56,6 +61,22 @@ body {
 @media (prefers-reduced-motion: reduce) {
   * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
+
+/* Кастомные скроллбары (project feedback 2026-08-25: "спинеры и скролбары
+   используются все еще стандартные... различия отображения в хроме и
+   файрфоксе") — до этого правки не было вообще, так что оба браузера
+   рисовали свой родной scrollbar (Firefox по умолчанию — светлый, широкий,
+   не подчиняется теме приложения). `scrollbar-width`/`scrollbar-color`
+   покрывают Firefox, `::-webkit-scrollbar*` — Chrome/Safari/Edge; вместе
+   дают одинаковый тонкий тёмный скроллбар в обоих. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg3) transparent;
+}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
 /* ── icon sprite use ── (symbols defined once in index.html, see #icon-sprite) */
 .icon {
@@ -123,6 +144,74 @@ main { display: flex; flex: 1; overflow: hidden; }
 }
 #chart { width: 100%; height: 100%; }
 
+/* Ценовой уровень: линия наведения + ВСЕ подписи цены (зафиксированные/
+   pending/наведение) — обычный HTML/CSS-оверлей поверх Plotly, а не его
+   собственные shapes/annotations (project feedback 2026-08-25: подписи
+   цены не появлялись при загрузке в лог-масштабе, и не удалось надёжно
+   выяснить причину через Plotly-аннотации — see cursor_tools.js:
+   renderPriceLevelOverlay). Позиция — pixel top, посчитанный НАПРЯМУЮ через
+   уже проверенную по исходнику Plotly математику (chart.js:priceToPixelY),
+   без хождения через Plotly.relayout вообще — что заодно убирает
+   `mousemove` → `Plotly.relayout` как источник конфликта с собственным
+   состоянием перетаскивания/зума Plotly. pointer-events:none на контейнере
+   — оверлей не должен перехватывать клики/драг, предназначенные графику. */
+#price-level-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* Блокер на время loadCandles (project feedback 2026-08-25: "при загрузке
+   тикера добавить блокер, пока все что нужно загружается на график") —
+   loadCandles идёт долгой цепочкой await'ов (свечи, история прогнозов,
+   догрузка закреплённых, T-настройки, все per-tool defaults...), в течение
+   которой чарт временно показывает данные СТАРОГО тикера/пуст — клики по
+   инструментам/тикерам в этом окне уводят состояние в гонку с ещё идущей
+   загрузкой. pointer-events:auto (в отличие от #price-level-overlay) —
+   намеренно блокирует клики по графику, пока идёт загрузка. z-index выше
+   #price-level-overlay, чтобы перекрывать и его тоже. */
+#chart-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(13, 17, 23, 0.45);
+  pointer-events: auto;
+}
+#chart-loading-overlay.hidden { display: none; }
+.spinner-ring {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.price-level-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dotted;
+}
+.price-level-line.dashed { border-top-style: dashed; }
+.price-level-label {
+  position: absolute;
+  right: 4px;
+  top: -13px;
+  font-size: 10px;
+  padding: 1px 3px;
+  background: rgba(13, 17, 23, 0.6);
+  border-radius: 2px;
+  white-space: nowrap;
+}
+
 /* ── panel ── */
 #panel {
   width: var(--panel);
@@ -184,6 +273,20 @@ main { display: flex; flex: 1; overflow: hidden; }
   padding: 0 4px;
   text-transform: uppercase;
 }
+
+/* Закреплённые T прогноз-зигзага (§2.4 of docs/plans/frontend_improvements_
+   plan.md) — small removable chips, sma/ui/forecast.js:renderZigzagPinnedList. */
+.zigzag-pin-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 4px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+}
 .ticker-row .coverage-line {
   color: var(--muted);
   font-size: 10.5px;
@@ -217,6 +320,86 @@ main { display: flex; flex: 1; overflow: hidden; }
 }
 .icon-btn:hover { color: var(--accent); background: none; filter: none; }
 .icon-btn.danger:hover { color: var(--red); }
+
+/* Tool panel header — label + eye-toggle ("закрепить на графике"), same
+   position/markup across every main-chart analyzer panel (trend_ruler,
+   moving_averages, zigzag_tool) that replaces the old "Показывать на
+   графике" checkbox previously buried at the bottom of each panel (project
+   feedback 2026-08-20, §2.6 of docs/plans/frontend_improvements_plan.md —
+   "иконку нужно заметнее сделать и чтобы у разных инструментов она
+   находилась в одинаковых легкодоступных местах"). Deliberately bigger/more
+   prominent than .hist-eye-btn (history-row pins) — this is a standing
+   per-tool setting, not a per-row action buried in a scrolling list. */
+.tool-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--border);
+}
+.tool-panel-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text);
+}
+.tool-show-toggle {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: var(--radius-sm);
+  padding: 3px 7px;
+  cursor: pointer;
+  line-height: 1;
+}
+.tool-show-toggle .icon { width: 15px; height: 15px; }
+.tool-show-toggle:hover { border-color: var(--accent); color: var(--text); }
+.tool-show-toggle.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+/* Цветовой профиль (Настройки приложения) — one row of native color swatches
+   per palette (MA / zigzag_tool), no add/remove — the profile is a fixed-
+   length role, not a user-managed list (§1.1a of
+   docs/plans/frontend_improvements_plan.md). */
+.cp-palette-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+.cp-palette-row input[type="color"] {
+  width: 28px;
+  height: 24px;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  cursor: pointer;
+}
+
+/* Sub-heading INSIDE a color-profile group section, one per owning tool
+   (project feedback 2026-08-25: "не хватает разделения для инструментов,
+   использующих несколько цветов") — a lighter weight/no border, since the
+   group's own <h4> (panel-section header) already provides the heavier
+   division; this is one level down, not a second accordion. */
+.cp-tool-group { margin-bottom: var(--space-3); }
+.cp-tool-group:last-child { margin-bottom: 0; }
+.cp-tool-label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: var(--space-1);
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--border);
+}
 
 .sec-row {
   display: flex;
@@ -262,6 +445,13 @@ main { display: flex; flex: 1; overflow: hidden; }
   width: 100%;
   display: flex;
   align-items: center;
+  /* generic `button` (below) sets justify-content:center for its own
+     inline-flex icon+label buttons — .accordion-header never overrode it,
+     so its flex children (arrow + label) centered despite text-align:left
+     already being set (irrelevant here — that only affects inline content,
+     not flex-item alignment along the main axis). Project feedback
+     2026-08-25: "аккордеоны центрируются... лучше по левому краю". */
+  justify-content: flex-start;
   gap: var(--space-2);
   background: none;
   border: none;
@@ -460,6 +650,50 @@ main { display: flex; flex: 1; overflow: hidden; }
   margin-top: var(--space-1);
 }
 
+/* XY-пад — квадратный 2D-контроллер (regime_mixture_potential: сдвиг×крутизна
+   цвета heatmap), как на синтезаторах/секвенсорах. X = горизонталь, Y =
+   вертикаль (инвертирована — верх пада = максимум, низ = минимум). */
+.xy-pad-row { margin-top: var(--space-2); }
+.xy-pad {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  max-width: 180px;
+  margin: var(--space-1) auto;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+.xy-pad-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, var(--border) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 1px, transparent 1px);
+  background-size: 25% 25%;
+  opacity: 0.5;
+  pointer-events: none;
+}
+.xy-pad-thumb {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+  pointer-events: none;
+}
+.xy-pad-readout {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
 /* ── progress ── */
 #progress-track {
   background: var(--bg3);
@@ -524,7 +758,6 @@ main { display: flex; flex: 1; overflow: hidden; }
 }
 .hist-date  { color: var(--muted); flex: 1; }
 .hist-price { font-weight: 600; }
-.hist-stale { color: var(--yellow); font-size: 10px; }
 .hist-del-btn {
   background: none;
   border: none;
@@ -612,13 +845,16 @@ main { display: flex; flex: 1; overflow: hidden; }
   position: relative;
   flex-shrink: 0;
 }
-.info-badge::after {
-  content: attr(data-tip);
+/* Floating tooltip (sma/ui/tooltip.js) — a single position:fixed element
+   shared by every .info-badge, positioned via getBoundingClientRect() on
+   hover/focus instead of a CSS ::after. position:fixed isn't confined by an
+   ancestor's overflow:hidden the way an absolutely-positioned ::after was
+   (#panel/#left-panel need overflow-x:hidden for unrelated reasons — see
+   their own comments — which used to clip this whenever a badge sat near
+   the panel's edge). */
+#global-tooltip {
   display: none;
-  position: absolute;
-  left: 50%;
-  top: 18px;
-  transform: translateX(-50%);
+  position: fixed;
   width: 220px;
   background: var(--bg3);
   border: 1px solid var(--border);
@@ -628,13 +864,10 @@ main { display: flex; flex: 1; overflow: hidden; }
   font-weight: 400;
   color: var(--text);
   white-space: pre-line;
-  z-index: 200;
+  z-index: 500;
   box-shadow: 0 4px 12px rgba(0,0,0,0.4);
   pointer-events: none;
-  text-transform: none;
-  letter-spacing: 0;
 }
-.info-badge:hover::after { display: block; }
 
 /* ── inputs / buttons ──
    Native controls normalized so the app looks the same regardless of which
@@ -660,15 +893,76 @@ input[type="text"]:focus-visible,
 input[type="number"]:focus-visible,
 select:focus-visible { border-color: var(--accent); }
 
-/* Number inputs: keep the field, drop the native spin buttons — the single
-   biggest Chrome/Firefox rendering difference among the form controls, and
-   most numeric fields already pair with a styled range slider anyway. */
+/* Standalone color-profile swatches (Настройки приложения) outside a
+   .cp-palette-row — same small bordered-swatch look, one input per role. */
+input[type="color"] {
+  width: 36px;
+  height: 24px;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  cursor: pointer;
+}
+
+/* Number inputs — native spin buttons hidden UNIVERSALLY now (Chrome vs
+   Firefox render them completely differently — project feedback 2026-08-25:
+   "спинеры... по-прежнему не кастомизированы и по-разному отображаются"),
+   replaced by a custom cross-browser spin-input widget (spin_input.js:
+   wrapSpinInput, wraps every input[type=number] at runtime — see that
+   module for why JS-side wrapping instead of editing markup in ~5 different
+   files that generate number inputs dynamically). Most fields are the ONLY
+   way to point-tune that value (project feedback 2026-08-19: "пропали
+   спинеры для точечной подстройки" — the custom widget now covers that same
+   need everywhere, so this is no longer the trade-off it used to be).
+   .no-spin (paired with an adjacent range slider — #tr-window/#vo-window
+   only) still opts a field OUT of the spinner entirely — genuinely
+   redundant there, not just re-skinned; spin_input.js checks the same class. */
 input[type="number"] { -moz-appearance: textfield; }
 input[type="number"]::-webkit-outer-spin-button,
 input[type="number"]::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
 }
+
+.spin-input-wrap {
+  position: relative;
+  display: inline-flex;
+  vertical-align: middle;
+}
+.spin-input-wrap input[type="number"] {
+  width: 100%;
+  padding-right: 16px;
+}
+.spin-btns {
+  position: absolute;
+  right: 1px;
+  top: 1px;
+  bottom: 1px;
+  width: 14px;
+  display: flex;
+  flex-direction: column;
+}
+.spin-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  background: var(--bg3);
+  border: none;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 7px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.spin-btn:first-child { border-bottom: 1px solid var(--border); border-top-right-radius: var(--radius-md); }
+.spin-btn:last-child { border-bottom-right-radius: var(--radius-md); }
+.spin-btn:hover { background: var(--accent); color: #0d1117; filter: none; }
+.spin-btn:active { filter: none; background: var(--accent-dim); }
 
 /* select: custom chevron replacing the native (OS-themed) arrow. */
 select {
@@ -709,10 +1003,13 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent-dim); out
 
 /* range: styled as a fader (the vernacular of an instrument/mixing panel,
    consistent with the rest of this analytical-tool aesthetic) — thin track,
-   a filled portion up to the handle where the browser supports it
-   (Firefox's ::-moz-range-progress; WebKit has no equivalent so Chrome/
-   Safari show an unfilled track with just the handle), a small rectangular
-   cap rather than a plain circle. */
+   a filled portion up to the handle, a small rectangular cap rather than a
+   plain circle. Firefox fills it natively (::-moz-range-progress below);
+   WebKit has no equivalent pseudo-element, so the fill there is faked with
+   a background gradient driven by --range-pct (sma/ui/range_progress.js
+   keeps it in sync with the actual value on every drag/programmatic set —
+   project feedback: "у ползунков в фоксе есть синяя подсветка, в хроме
+   нет"). */
 input[type="range"] {
   appearance: none;
   -webkit-appearance: none;
@@ -720,12 +1017,14 @@ input[type="range"] {
   height: 16px;
   background: transparent;
   cursor: pointer;
+  --range-pct: 0%;
 }
 input[type="range"]::-webkit-slider-runnable-track {
   height: 4px;
   border-radius: var(--radius-sm);
-  background: var(--bg3);
   border: 1px solid var(--border);
+  background: linear-gradient(to right,
+    var(--accent) var(--range-pct), var(--bg3) var(--range-pct));
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -798,3 +1097,69 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   font-weight: 400;
 }
 .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+
+.btn-danger { background: var(--red); color: #fff; }
+
+/* ── custom confirm() dialog (project feedback 2026-08-25 — replaces
+   window.confirm(), see dialog.js) ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+.modal-overlay.hidden { display: none; }
+.modal {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.modal-header {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.modal-title { font-weight: 600; font-size: var(--fs-md); }
+.modal-body {
+  padding: var(--space-4);
+  font-size: var(--fs-base);
+  color: var(--text);
+  line-height: 1.5;
+}
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+/* Medium single-pane variant (band_lambda "Пул" modal) — the plain
+   confirm-box .modal above is capped at 420px, a bit tight for category
+   checkboxes + ticker chips + search. */
+.modal-medium {
+  max-width: 600px;
+  width: 95vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+.modal-medium .modal-header { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; }
+.modal-medium .modal-body { overflow-y: auto; }
+.bl-pool-ticker-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--bg3); border-radius: var(--radius-sm);
+  padding: 2px 4px 2px 8px; margin: 2px 4px 2px 0; font-size: var(--fs-xs);
+}
+/* Shared table style, despite the "bl-" prefix — also used by
+   range_forecast.js's calibration-result table. */
+.bl-coverage-table { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); margin-top: var(--space-2); }
+.bl-coverage-table th, .bl-coverage-table td { text-align: right; padding: 2px 6px; }
+.bl-coverage-table th:first-child, .bl-coverage-table td:first-child { text-align: left; }
+.bl-coverage-table thead th { border-bottom: 1px solid var(--border); color: var(--muted); font-weight: 400; }

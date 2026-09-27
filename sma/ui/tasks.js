@@ -68,10 +68,16 @@ function renderTaskList(tasks) {
 function renderTaskRow(task) {
   const row = document.createElement('div');
   row.className = 'task-row';
+  // No progress bar here (project feedback 2026-08-25: "у симплекса
+  // продолжают отображаться прогресс бары после завершения... в целом можно
+  // полностью убрать из развёрнутого списка") — a finished task's row would
+  // otherwise keep showing its LAST progress_done/progress_total (still
+  // truthy after completion, see miniProgress), reading as "still running".
+  // Progress now lives ONLY in the always-visible «Текущая задача» section
+  // (renderTaskStatus below), which only ever shows the actually-running task.
   row.innerHTML = `
     <div class="task-main">
       <div class="task-label" title="${esc(task.label || task.kind)}">${esc(task.label || task.kind)}</div>
-      ${miniProgress(task)}
     </div>
     <span class="status-badge ${esc(task.status)}">${esc(STATUS_LABELS[task.status] || task.status)}</span>
   `;
@@ -83,13 +89,25 @@ function renderTaskRow(task) {
     btn.innerHTML = iconHtml('close');
     btn.onclick = () => cancelTask(task.id);
     row.appendChild(btn);
-  } else if (RESUMABLE.includes(task.status)) {
-    const btn = document.createElement('button');
-    btn.className = 'icon-btn';
-    btn.title = 'Возобновить';
-    btn.innerHTML = iconHtml('refresh');
-    btn.onclick = () => resumeTask(task.id);
-    row.appendChild(btn);
+  } else {
+    // Every terminal status (done/cancelled/interrupted/error) gets a
+    // delete button — cancelled/interrupted/error rows never auto-prune
+    // (unlike 'done', see prune_old_done_tasks) and previously had no way
+    // to be removed at all (reported 2026-09-12).
+    if (RESUMABLE.includes(task.status)) {
+      const resumeBtn = document.createElement('button');
+      resumeBtn.className = 'icon-btn';
+      resumeBtn.title = 'Возобновить';
+      resumeBtn.innerHTML = iconHtml('refresh');
+      resumeBtn.onclick = () => resumeTask(task.id);
+      row.appendChild(resumeBtn);
+    }
+    const delBtn = document.createElement('button');
+    delBtn.className = 'icon-btn danger';
+    delBtn.title = 'Удалить';
+    delBtn.innerHTML = iconHtml('close');
+    delBtn.onclick = () => deleteTaskRow(task.id);
+    row.appendChild(delBtn);
   }
 
   return row;
@@ -108,6 +126,15 @@ export async function cancelTask(id) {
 export async function resumeTask(id) {
   try {
     await api('POST', `/tasks/${id}/resume`);
+    await refreshTasks();
+  } catch (e) {
+    setStatus(e.message, 'err');
+  }
+}
+
+export async function deleteTaskRow(id) {
+  try {
+    await api('DELETE', `/tasks/${id}`);
     await refreshTasks();
   } catch (e) {
     setStatus(e.message, 'err');

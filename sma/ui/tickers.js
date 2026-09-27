@@ -2,6 +2,7 @@ import { S } from './state.js';
 import { api, setStatus, connectTaskWS } from './api.js';
 import { refreshTasks } from './tasks.js';
 import { iconHtml } from './icons.js';
+import { showConfirm } from './dialog.js';
 
 // Ключ — asset_type (точнее engine: currency_metal и currency_selt делят один
 // engine="currency", но это разные по смыслу инструменты).
@@ -264,7 +265,7 @@ export async function refreshCurrentTicker(btn) {
 }
 
 async function removeTicker(id, ticker) {
-  if (!confirm(`Удалить тикер ${ticker} и все связанные данные (свечи, прогнозы, задачи)?`)) return;
+  if (!(await showConfirm(`Удалить тикер ${ticker} и все связанные данные (свечи, прогнозы, задачи)?`))) return;
   try {
     await api('DELETE', `/instruments/${id}`);
     if (S.ticker === ticker) {
@@ -277,6 +278,7 @@ async function removeTicker(id, ticker) {
       S.shapes = [];
       S.spectrogramData = null;
       S.subpanel = 'none';
+      S.activeOscillatorTool = 'none';
       if (window.Plotly) window.Plotly.purge('chart');
     }
     await refreshAll();

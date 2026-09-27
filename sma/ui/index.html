@@ -45,6 +45,11 @@
     <path d="M1.2 10S4.8 4 10 4s8.8 6 8.8 6-3.6 6-8.8 6-8.8-6-8.8-6z"/>
     <circle cx="10" cy="10" r="2.4"/>
   </symbol>
+  <symbol id="icon-eye-off" viewBox="0 0 20 20">
+    <path d="M1.2 10S4.8 4 10 4s8.8 6 8.8 6-3.6 6-8.8 6-8.8-6-8.8-6z"/>
+    <circle cx="10" cy="10" r="2.4"/>
+    <line x1="2" y1="17" x2="18" y2="3"/>
+  </symbol>
   <symbol id="icon-cursor" viewBox="0 0 20 20">
     <path d="M4 2l11 11-5 1.2-1.2 5z"/>
   </symbol>
@@ -91,6 +96,24 @@
     <line x1="3" y1="10" x2="18" y2="13"/>
     <line x1="3" y1="10" x2="18" y2="18"/>
     <circle class="icon-fill" cx="3" cy="10" r="1.7"/>
+  </symbol>
+  <symbol id="icon-range" viewBox="0 0 20 20">
+    <line x1="6" y1="4" x2="6" y2="16"/>
+    <line x1="4" y1="4" x2="8" y2="4"/>
+    <line x1="4" y1="16" x2="8" y2="16"/>
+    <line x1="14" y1="7" x2="14" y2="13"/>
+    <line x1="12" y1="7" x2="16" y2="7"/>
+    <line x1="12" y1="13" x2="16" y2="13"/>
+  </symbol>
+  <symbol id="icon-risk" viewBox="0 0 20 20">
+    <line x1="2.5" y1="10" x2="17.5" y2="3.5"/>
+    <line x1="2.5" y1="10" x2="17.5" y2="16.5"/>
+    <circle class="icon-fill" cx="2.5" cy="10" r="1.6"/>
+  </symbol>
+  <symbol id="icon-potential" viewBox="0 0 20 20">
+    <circle class="icon-fill" cx="6" cy="7" r="3.2" opacity="0.9"/>
+    <circle class="icon-fill" cx="14" cy="12.5" r="2.3" opacity="0.6"/>
+    <circle class="icon-fill" cx="15.5" cy="4.5" r="1.4" opacity="0.4"/>
   </symbol>
 </svg>
 
@@ -184,7 +207,8 @@
           <div id="task-manager-body" class="accordion-body">
 
             <section class="panel-section">
-              <button id="tasks-resume-all-btn" onclick="resumeAllTasks()" style="width:100%" disabled>
+              <button id="tasks-resume-all-btn" onclick="resumeAllTasks()" style="width:100%" disabled
+                title="Активна, когда в списке задач есть отменённые, прерванные или завершившиеся ошибкой — перезапускает все такие задачи разом">
                 Запустить всё
               </button>
             </section>
@@ -210,9 +234,9 @@
               <h4>
                 Производительность
                 <span class="info-badge" data-tip=
-"Параллельных запросов к MOEX — при отборе пула калибровки/претеста (ранжирование по ликвидности) на каждого кандидата-тикера идёт отдельный HTTP-запрос; это ограничивает, сколько идёт одновременно. Меньше — медленнее, но мягче к сети.
+"Параллельных запросов к MOEX — при отборе пула Band Lambda (ранжирование кандидатов-тикеров по ликвидности) на каждого кандидата идёт отдельный HTTP-запрос; это ограничивает, сколько идёт одновременно. Меньше — медленнее, но мягче к сети.
 
-Потоков вычислений (CPU) — лимит на параллельные CPU-bound задачи (сейчас единственная такая — калибровка λ: ProcessPoolExecutor, один процесс на каждый T). 0 = авто (ядра CPU / 4 — numpy-операции упираются в память, не в ядра, агрессивные значения только всё замедляют).">?</span>
+Потоков вычислений (CPU) — лимит на параллельные CPU-bound задачи (прогноз Simplex-ансамбля, «Потенциала» и калибровка прогноза диапазона — все через ProcessPoolExecutor). 0 = авто (число ядер CPU / 4) — numpy-операции упираются в пропускную способность памяти, а не в число ядер, поэтому большее число процессов не ускоряет расчёт, а замедляет его.">?</span>
               </h4>
               <div class="field-row">
                 <label>Запросов к MOEX</label>
@@ -221,13 +245,45 @@
               <div class="field-row">
                 <label>Потоков вычислений (CPU)</label>
                 <input id="settings-calibration-workers" type="number" value="0" min="0" max="64"
-                  title="0 = авто (ядра CPU / 4). Сейчас применяется только к калибровке λ — единственной CPU-bound параллельной задаче в приложении.">
+                  title="0 = авто (ядра CPU / 4). Применяется к прогнозу Simplex-ансамбля, «Потенциала» и калибровке прогноза диапазона.">
               </div>
-              <button id="settings-save-btn" onclick="saveAppSettings()" style="width:100%;margin-top:6px">
-                Применить
-              </button>
             </section>
 
+            <section class="panel-section">
+              <h4>
+                График
+                <span class="info-badge" data-tip="Сколько баров держится загруженными и отрисованными на основном графике одновременно — на тикерах с большой внутридневной историей (10m/1h за годы) вся история разом заметно нагружает браузер, особенно Firefox. При панорамировании влево догружается ещё столько же; вправо в текущей сессии не обрезается.">?</span>
+              </h4>
+              <div class="field-row">
+                <label>Свечей на графике</label>
+                <input id="settings-chart-window-bars" type="number" value="1000" min="200" max="20000" step="100">
+              </div>
+            </section>
+
+            <button id="settings-save-btn" onclick="saveAppSettings()" style="width:100%;margin-top:6px">
+              Сохранить
+            </button>
+
+          </div>
+        </div>
+      </div>
+
+      <div class="accordion">
+        <div class="accordion-item">
+          <button class="accordion-header" onclick="toggleAccordion(this)">
+            <span class="accordion-arrow">▸</span> Цветовой профиль
+          </button>
+          <div id="color-profile-body" class="accordion-body">
+            <section class="panel-section" style="padding-bottom:0">
+              <span class="info-badge" data-tip=
+"Фиксированные роли, не список экземпляров: один цвет на ВСЕ ценовые уровни, одна палитра на ВСЕ линии MA (циклически по порядку добавления), и т.д. — не настройка цвета отдельного уровня/объекта.">?</span>
+            </section>
+            <div id="color-profile-form"></div>
+            <section class="panel-section" style="padding-top:0">
+              <button id="color-profile-save-btn" onclick="saveColorProfile()" style="width:100%">
+                Сохранить
+              </button>
+            </section>
           </div>
         </div>
       </div>
@@ -236,6 +292,8 @@
 
     <div id="chart-wrap">
       <div id="chart"></div>
+      <div id="price-level-overlay"></div>
+      <div id="chart-loading-overlay" class="hidden"><div class="spinner-ring"></div></div>
     </div>
 
     <aside id="panel">
@@ -334,17 +392,25 @@
             <section class="panel-section" id="results-section-object_select" style="display:none">
               <h4 style="display:flex;align-items:center;gap:6px">
                 Результат
-                <button class="hist-eye-btn" id="object-select-pin-btn" onclick="toggleSelectedForecastPin()"
+                <button class="hist-eye-btn" id="results-pin-btn-object_select" onclick="toggleSelectedForecastPin()"
                   title="Закрепить/снять отображение на графике"><svg class="icon"><use href="#icon-eye"/></svg></button>
               </h4>
               <div id="results-object_select"></div>
             </section>
+            <div id="object-select-display-slot"></div>
           </div>
 
           <div id="tool-panel-trend_ruler" style="display:none">
+            <div class="tool-panel-header">
+              <span class="tool-panel-title">Линейка тренда</span>
+              <button class="tool-show-toggle" id="tr-show-chart-btn" onclick="toggleTrendRulerShowChart()"
+                title="Закрепить на графике (иначе виден, только пока этот инструмент активен)">
+                <svg class="icon"><use href="#icon-eye"/></svg>
+              </button>
+            </div>
             <div class="field-row">
               <label>Окно (баров)</label>
-              <input id="tr-window" type="number" value="200" min="10" max="2000" step="1" style="width:80px"
+              <input id="tr-window" type="number" class="no-spin" value="200" min="10" max="2000" step="1" style="width:80px"
                 oninput="onTrendRulerWindowInput(this.value)">
             </div>
             <input id="tr-window-range" type="range" min="10" max="2000" step="1" value="200"
@@ -409,13 +475,16 @@
               отсчёта сюда — сброс кнопкой ⟲ в тулбаре. Тренд и полосы обновляются сразу при изменении
               настроек — без «Рассчитать».
             </p>
-
-            <div class="field-row checkbox-row">
-              <label><input id="tr-show-chart" type="checkbox" onchange="onTrendRulerSettingsChange()"> Показывать на графике</label>
-            </div>
           </div>
 
           <div id="tool-panel-moving_averages" style="display:none">
+            <div class="tool-panel-header">
+              <span class="tool-panel-title">Скользящие средние</span>
+              <button class="tool-show-toggle" id="ma-show-chart-btn" onclick="toggleMaShowChart()"
+                title="Закрепить на графике (иначе видны, только пока этот инструмент активен)">
+                <svg class="icon"><use href="#icon-eye"/></svg>
+              </button>
+            </div>
             <div class="field-row">
               <label>Линии</label>
             </div>
@@ -423,24 +492,25 @@
             <button type="button" onclick="addMovingAverage()" style="width:100%;margin:2px 0 6px">
               + Добавить среднюю
             </button>
-            <div class="field-row checkbox-row">
-              <label><input id="ma-show-chart" type="checkbox" onchange="onMaSettingsChange()"> Показывать на графике</label>
-            </div>
           </div>
 
           <div id="tool-panel-zigzag_tool" style="display:none">
+            <div class="tool-panel-header">
+              <span class="tool-panel-title">Zig-Zag</span>
+              <button class="tool-show-toggle" id="zz-show-chart-btn" onclick="onZigzagToolShowChartChange()"
+                title="Закрепить на графике (иначе виден, только пока этот инструмент активен)">
+                <svg class="icon"><use href="#icon-eye"/></svg>
+              </button>
+            </div>
             <div class="field-row">
-              <label>Наборы (T%, min_bars)</label>
+              <label>Наборы (порог T%, мин. баров между разворотами)</label>
             </div>
             <div id="zz-list"></div>
             <button type="button" onclick="addZigzagSeries()" style="width:100%;margin:2px 0 6px">
               + Добавить зигзаг
             </button>
-            <div class="field-row checkbox-row">
-              <label><input id="zz-show-chart" type="checkbox" onchange="onZigzagToolShowChartChange()"> Показывать на графике</label>
-            </div>
             <p class="muted-val" style="margin:2px 0 6px">
-              Независимо от зигзага модели band_lambda ниже — свой набор порогов T,
+              Независимо от зигзага модели Band Lambda ниже — свой набор порогов T,
               каждый набор считается отдельным запросом.
             </p>
           </div>
@@ -448,20 +518,26 @@
           <div id="tool-panel-band_lambda" style="display:none">
 
             <section class="panel-section" id="results-section-band_lambda" style="display:none">
-              <h4>Результат</h4>
+              <h4 style="display:flex;align-items:center;gap:6px">
+                Результат
+                <button class="hist-eye-btn" id="results-pin-btn-band_lambda" onclick="toggleSelectedForecastPin()"
+                  title="Закрепить/снять отображение на графике"><svg class="icon"><use href="#icon-eye"/></svg></button>
+              </h4>
               <div id="results-band_lambda"></div>
             </section>
 
             <section class="panel-section">
-              <h4>
-                T (порог зигзага)
-                <span class="info-badge" data-tip="Только уже откалиброванные значения T. Новые T добавляются в разделе «Калибровка» ниже.">?</span>
-              </h4>
-              <div id="bl-t-selector">
-                <span class="muted-val">Нет калибровок — откройте «Калибровка» ниже</span>
+              <h4>T (порог зигзага)</h4>
+              <div class="field-row">
+                <input id="bl-t-input" type="number" value="20" min="1" max="60" step="1" onchange="onBandTChange()">
+                <span class="muted-val">%</span>
+                <button type="button" class="hist-eye-btn" id="bl-zigzag-pin-btn"
+                  title="Закрепить зигзаг этого T на графике" onclick="toggleZigzagPin()">
+                  <svg class="icon"><use href="#icon-eye"/></svg>
+                </button>
               </div>
-              <div id="bl-t-pool-variants"></div>
-              <button id="bl-forecast-btn" onclick="submitForecast()" style="margin-top:8px;width:100%" disabled>
+              <div id="bl-zigzag-pinned-list" style="margin-top:4px"></div>
+              <button id="bl-forecast-btn" onclick="submitForecast()" style="margin-top:8px;width:100%">
                 ▶ Прогноз (последнее событие)
               </button>
               <small class="hint">Клик по графику ставит точку отсчёта — кнопка возьмёт последнее подтверждённое событие зигзага до неё (или точно на ней). Клик по треугольнику — открыть готовый прогноз.</small>
@@ -470,59 +546,29 @@
             <div class="accordion">
               <div class="accordion-item">
                 <button class="accordion-header" onclick="toggleAccordion(this)">
-                  <span class="accordion-arrow">▸</span> Калибровка
+                  <span class="accordion-arrow">▸</span> Параметры
                 </button>
                 <div class="accordion-body">
 
                   <section class="panel-section">
                     <h4>
-                      Пул калибровки
-                      <span class="info-badge" data-tip="Автоотбор по категории + обороту (топ-N), без ручного выбора тикеров. Несколько категорий — union с дедупом (напр. металлы+акции, если металлов не хватает по глубине).">?</span>
-                    </h4>
-                    <div class="field-row checkbox-row"><label><input type="checkbox" class="bl-pool-cat" value="stock" checked> Акции</label></div>
-                    <div class="field-row checkbox-row"><label><input type="checkbox" class="bl-pool-cat" value="bond"> Облигации</label></div>
-                    <div class="field-row checkbox-row"><label><input type="checkbox" class="bl-pool-cat" value="fund"> Фонды (ПИФ)</label></div>
-                    <div class="field-row checkbox-row"><label><input type="checkbox" class="bl-pool-cat" value="currency"> Валюта</label></div>
-                    <div class="field-row checkbox-row"><label><input type="checkbox" class="bl-pool-cat" value="metal"> Металлы</label></div>
-                    <div class="field-row checkbox-row"><label><input type="checkbox" class="bl-pool-cat" value="futures"> Фьючерсы</label></div>
-                    <div class="field-row">
-                      <label>N на категорию</label>
-                      <input id="bl-pool-n" type="number" value="25" min="1" max="200">
-                    </div>
-                  </section>
-
-                  <section class="panel-section">
-                    <h4>Уровни T</h4>
-                    <div id="bl-calib-targets-list"></div>
-                    <button id="bl-calib-target-add-btn" onclick="addCalibTargetRow()" style="width:100%;margin-top:6px">+ Добавить T</button>
-                  </section>
-
-                  <section class="panel-section">
-                    <h4>
                       Параметры модели
-                      <span class="info-badge" data-tip="m — размерность вложения (число плечей зигзага в векторе запроса). θ — доп. локализация S-map по вектору (0 = только λ-веса пула; калибровка θ не пережила OOS-проверку ни на одном из тестовых тикеров, дефолт 0 не просто так).">?</span>
+                      <span class="info-badge" data-tip="Живые параметры следующего прогноза. m — размерность вложения (число плечей зигзага в векторе запроса). θ — доп. локализация S-map по вектору (0 = только λ-веса пула; калибровка θ не пережила OOS-проверку ни на одном из тестовых тикеров).">?</span>
                     </h4>
                     <div class="field-row">
                       <label>m</label>
-                      <input id="bl-calib-m" type="number" value="6" min="1" max="30">
+                      <input id="bl-calib-m" type="number" value="6" min="1" max="30" onchange="onBandModelParamsChange()">
                     </div>
                     <div class="field-row">
                       <label>θ</label>
-                      <input id="bl-calib-theta" type="number" value="0" min="0" step="0.1">
+                      <input id="bl-calib-theta" type="number" value="0" min="0" step="0.1" onchange="onBandModelParamsChange()">
                     </div>
                   </section>
 
                   <section class="panel-section">
-                    <div class="field-row">
-                      <button id="bl-pretest-btn" onclick="runPretest()" style="flex:1;margin-right:6px">Претест</button>
-                      <button id="bl-calibrate-btn" onclick="runCalibration()" style="flex:1">Калибровать</button>
-                    </div>
-                    <div id="bl-pretest-result"></div>
-                  </section>
-
-                  <section class="panel-section">
-                    <h4>Откалиброванные наборы</h4>
-                    <div id="bl-settings-list"><span class="muted-val">—</span></div>
+                    <h4>Пул</h4>
+                    <div id="bl-pool-summary"><span class="muted-val">—</span></div>
+                    <button type="button" onclick="openBandPoolModal()" style="width:100%;margin-top:6px">Пул…</button>
                   </section>
 
                 </div>
@@ -534,29 +580,49 @@
                 <button class="accordion-header" onclick="toggleAccordion(this)">
                   <span class="accordion-arrow">▸</span> Отображение
                 </button>
-                <div class="accordion-body">
+                <div class="accordion-body" id="band_lambda-display-section">
                   <section class="panel-section">
-                    <div class="field-row checkbox-row">
-                      <label><input id="bl-show-zigzag" type="checkbox" checked onchange="toggleZigzagDisplay()"> Зигзаг на графике</label>
-                    </div>
                     <div class="field-row">
-                      <label>Ширина шага</label>
-                      <span id="bl-band-width-label" class="muted-val">5 бар.</span>
+                      <label>Ширина шага 1 (уход)</label>
+                      <span id="bl-band-width1-label" class="muted-val">5 бар.</span>
                     </div>
-                    <input id="bl-band-width-slider" type="range" min="1" max="300" step="1" value="5"
+                    <input id="bl-band-width1-slider" type="range" min="1" max="300" step="1" value="5"
                       style="width:100%" oninput="applyBandWidth()">
-                    <small class="hint">Полосы прогноза не предсказывают ВРЕМЯ события — двигайте ширину, чтобы визуально «подтянуть» поле под текущую дату.</small>
+                    <div class="field-row" style="margin-top:6px">
+                      <label>Ширина шага 2 (уход+возврат)</label>
+                      <span id="bl-band-width2-label" class="muted-val">5 бар.</span>
+                    </div>
+                    <input id="bl-band-width2-slider" type="range" min="1" max="300" step="1" value="5"
+                      style="width:100%" oninput="applyBandWidth()">
+                    <small class="hint">Полосы прогноза не предсказывают ВРЕМЯ события — при построении прогноза ширина автоматически выставляется по медианной длительности прошлых плеч тикера того же направления (отдельно для шага 1 и 2), дальше её можно двигать вручную.</small>
 
                     <h4 style="margin-top:12px">
                       Зоны вероятности
                       <span class="info-badge" data-tip="Каждый чекбокс — центральный интервал вокруг медианы (напр. «50%» = средние 50% исходов, от 25-го до 75-го перцентиля). Включённые зоны одного шага накладываются друг на друга — более узкая поверх более широкой.">?</span>
                     </h4>
-                    <div id="bl-display-levels-box"></div>
+                    <div id="bl-display-levels-box" class="field-row checkbox-row"></div>
                     <div class="field-row" style="margin-top:6px">
                       <label>Прозрачность уровня</label>
-                      <input id="bl-display-opacity" type="range" min="0.05" max="0.6" step="0.01" value="0.22">
+                      <input id="bl-display-opacity" type="range" min="0.05" max="0.6" step="0.01" value="0.22"
+                        oninput="applyDisplaySettings()">
                     </div>
-                    <button onclick="applyDisplaySettings()" style="width:100%;margin-top:6px" title="Применить и сохранить как настройки по умолчанию">Применить</button>
+
+                    <div class="field-row" style="margin-top:10px">
+                      <label>Уровень доверия (%)
+                        <span class="info-badge" data-tip="Линия на шаге 1: цена, до которой с заданной вероятностью дойдёт движение — значение берётся из распределения шага 2, рисуется на шаге 1. Только визуальная подсказка — не привязана к инструменту «Ценовой уровень».">?</span>
+                      </label>
+                      <input id="bl-trade-level-pct" type="number" min="1" max="99" step="1" value="70"
+                        style="width:60px" onchange="applyDisplaySettings()">
+                    </div>
+                    <div class="field-row checkbox-row" style="margin-top:6px">
+                      <label><input id="bl-show-zones" type="checkbox" checked onchange="applyDisplaySettings()"> Показывать зоны вероятности</label>
+                    </div>
+                    <div class="field-row checkbox-row">
+                      <label><input id="bl-show-trade-level" type="checkbox" checked onchange="applyDisplaySettings()"> Показывать уровень доверия</label>
+                    </div>
+                    <div class="field-row checkbox-row">
+                      <label><input id="bl-trim-zone1" type="checkbox" onchange="applyDisplaySettings()"> Обрезать зону 1 по уровню доверия</label>
+                    </div>
                   </section>
                 </div>
               </div>
@@ -572,7 +638,11 @@
           <div id="tool-panel-simplex_ensemble" style="display:none">
 
             <section class="panel-section" id="results-section-simplex_ensemble" style="display:none">
-              <h4>Результат</h4>
+              <h4 style="display:flex;align-items:center;gap:6px">
+                Результат
+                <button class="hist-eye-btn" id="results-pin-btn-simplex_ensemble" onclick="toggleSelectedForecastPin()"
+                  title="Закрепить/снять отображение на графике"><svg class="icon"><use href="#icon-eye"/></svg></button>
+              </h4>
               <div id="results-simplex_ensemble"></div>
             </section>
 
@@ -595,7 +665,7 @@
                     <h4>Ансамбль</h4>
                     <div class="field-row">
                       <label>Окно W (число origin)</label>
-                      <input id="simplex-window" type="number" value="10" min="1" max="30">
+                      <input id="simplex-window" type="number" value="20" min="1" max="30">
                     </div>
                     <div class="field-row">
                       <label>Горизонт H (баров)</label>
@@ -640,11 +710,11 @@
                     </div>
                     <div class="field-row checkbox-row">
                       <label><input id="simplex-use-all-bars" type="checkbox" checked
-                        onchange="document.getElementById('simplex-bars').disabled = this.checked"> Все точки библиотеки</label>
+                        onchange="document.getElementById('simplex-bars').disabled = this.checked"> Все точки истории</label>
                     </div>
                     <div class="field-row">
-                      <label>Точек в библиотеке</label>
-                      <input id="simplex-bars" type="number" value="3000" min="100" max="5000" step="100" disabled>
+                      <label>Точек в истории</label>
+                      <input id="simplex-bars" type="number" value="5000" min="100" max="5000" step="100" disabled>
                     </div>
                   </section>
 
@@ -686,7 +756,7 @@
                 <button class="accordion-header" onclick="toggleAccordion(this)">
                   <span class="accordion-arrow">▸</span> Отображение
                 </button>
-                <div class="accordion-body">
+                <div class="accordion-body" id="simplex_ensemble-display-section">
                   <section class="panel-section">
                     <div class="field-row checkbox-row">
                       <label><input id="simplex-show-mean" type="checkbox" checked onchange="refreshSimplexDisplay()"> Показывать среднее + полосу</label>
@@ -710,6 +780,336 @@
 
           </div><!-- /tool-panel-simplex_ensemble -->
 
+          <div id="tool-panel-regime_mixture_potential" style="display:none">
+
+            <section class="panel-section" id="results-section-regime_mixture_potential" style="display:none">
+              <h4 style="display:flex;align-items:center;gap:6px">
+                Результат
+                <button class="hist-eye-btn" id="results-pin-btn-regime_mixture_potential" onclick="toggleSelectedForecastPin()"
+                  title="Закрепить/снять отображение на графике"><svg class="icon"><use href="#icon-eye"/></svg></button>
+              </h4>
+              <div id="results-regime_mixture_potential"></div>
+            </section>
+
+            <section class="panel-section">
+              <h4>Потенциал: режим + сценарии</h4>
+              <button id="potential-forecast-btn" onclick="submitPotentialForecast()" style="width:100%">
+                ▶ Прогноз (+ перемотка)
+              </button>
+              <small class="hint">Точка отсчёта — последний ИЗВЕСТНЫЙ бар (клик по графику ставит маркер). Перемотка считается сразу для N origin назад — дольше одного прогноза, но ползунок в «Отображении» переключает между ними без пересчёта.</small>
+            </section>
+
+            <div class="accordion">
+              <div class="accordion-item">
+                <button class="accordion-header" onclick="toggleAccordion(this)">
+                  <span class="accordion-arrow">▸</span> Параметры
+                </button>
+                <div class="accordion-body">
+
+                  <section class="panel-section">
+                    <h4>Метод</h4>
+                    <div class="field-row">
+                      <label>θ (резкость Gaussian)</label>
+                      <input id="potential-theta" type="number" value="5.0" min="0.5" max="10" step="0.5">
+                    </div>
+                    <div class="field-row">
+                      <label>Warmup (баров)</label>
+                      <input id="potential-warmup" type="number" value="250" min="50" max="1000" step="25">
+                    </div>
+                    <div class="field-row">
+                      <label>Окно Тайлера</label>
+                      <input id="potential-theiler" type="number" value="20" min="0" max="200" step="5">
+                    </div>
+                    <div class="field-row">
+                      <label>Горизонт H</label>
+                      <input id="potential-horizon" type="number" value="30" min="1" max="60">
+                    </div>
+                    <div class="field-row checkbox-row">
+                      <label><input id="potential-use-all-bars" type="checkbox" checked
+                        onchange="document.getElementById('potential-bars').disabled = this.checked"> Все точки истории</label>
+                    </div>
+                    <div class="field-row">
+                      <label>Точек в истории</label>
+                      <input id="potential-bars" type="number" value="5000" min="100" max="10000" step="100" disabled>
+                    </div>
+                  </section>
+
+                  <section class="panel-section">
+                    <h4>Lagged-ensemble</h4>
+                    <div class="field-row">
+                      <label>N_LOOKBACK (доп. origin консенсуса)</label>
+                      <input id="potential-n-lookback" type="number" value="8" min="0" max="20">
+                    </div>
+                    <div class="field-row">
+                      <label>Шаг консенсуса</label>
+                      <input id="potential-lookback-step" type="number" value="1" min="1" max="10">
+                    </div>
+                    <div class="field-row">
+                      <label>N_SIM (ресэмплинг путей)</label>
+                      <input id="potential-n-sim" type="number" value="10000" min="500" max="20000" step="500">
+                    </div>
+                    <div class="field-row">
+                      <label>Seed</label>
+                      <input id="potential-seed" type="number" value="42">
+                    </div>
+                  </section>
+
+                  <section class="panel-section">
+                    <h4>Mixture / heatmap</h4>
+                    <div class="field-row">
+                      <label>Ресэмплинг GMM (точек на h)</label>
+                      <input id="potential-mix-n-resample" type="number" value="1500" min="500" max="3000" step="250">
+                    </div>
+                    <div class="field-row">
+                      <label>Высота бина heatmap (% цены)</label>
+                      <input id="potential-bin-height" type="number" value="0.2" min="0.001" step="0.05">
+                    </div>
+                  </section>
+
+                  <section class="panel-section">
+                    <h4>
+                      Перемотка
+                      <span class="info-badge" data-tip="Общее число прогнозов (включая точку отсчёта) — минимум 1 (без перемотки), считаются СРАЗУ на «▶ Прогноз», ползунок в «Отображении» переключает между ними без пересчёта.">?</span>
+                    </h4>
+                    <div class="field-row">
+                      <label>N — число прогнозов</label>
+                      <input id="potential-n-forecasts" type="number" value="20" min="1" max="50">
+                    </div>
+                    <div class="field-row">
+                      <label>Шаг между origin (баров)</label>
+                      <input id="potential-rewind-step" type="number" value="1" min="1" max="20">
+                    </div>
+                  </section>
+
+                </div>
+              </div>
+            </div>
+
+            <div class="accordion">
+              <div class="accordion-item">
+                <button class="accordion-header" onclick="toggleAccordion(this)">
+                  <span class="accordion-arrow">▸</span> Отображение
+                </button>
+                <div class="accordion-body" id="regime_mixture_potential-display-section">
+                  <section class="panel-section">
+                    <div class="field-row">
+                      <label>Heatmap
+                        <span class="info-badge" data-tip="«Сценарии» — прозрачность напрямую равна вероятности сценария (вес компоненты GMM). «Сырая плотность» — контрольный режим без GMM-допущений, эмпирика как есть, для проверки, что сценарии не артефакт фита.">?</span>
+                      </label>
+                      <select id="potential-heatmap-mode" onchange="onPotentialHeatmapModeChange(this.value)">
+                        <option value="scenarios" selected>Сценарии</option>
+                        <option value="raw">Сырая плотность</option>
+                      </select>
+                    </div>
+                    <div class="xy-pad-row">
+                      <label>Цвет heatmap — крутизна (X) × сдвиг (Y)</label>
+                      <div id="potential-xy-pad" class="xy-pad">
+                        <div class="xy-pad-grid"></div>
+                        <div id="potential-xy-thumb" class="xy-pad-thumb"></div>
+                      </div>
+                      <div class="xy-pad-readout">
+                        <span id="potential-xy-x-label">X: 1.0</span>
+                        <span id="potential-xy-y-label">Y: 0.00</span>
+                      </div>
+                    </div>
+                    <div class="field-row checkbox-row">
+                      <label><input id="potential-show-bounds" type="checkbox" onchange="onPotentialShowBoundsChange()"> Границы покрытия</label>
+                    </div>
+                    <div class="field-row">
+                      <label>Покрытие
+                        <span class="info-badge" data-tip="Считается мгновенно на клиенте из уже посчитанной эмпирической плотности снапшота (без обращения к серверу) — можно менять свободно, в т.ч. при перемотке.">?</span>
+                      </label>
+                      <span id="potential-coverage-label" class="muted-val">95%</span>
+                    </div>
+                    <input id="potential-coverage-slider" type="range" min="10" max="100" step="5" value="95"
+                      style="width:100%" oninput="onPotentialCoverageInput(this.value)">
+                    <div class="field-row" style="margin-top:6px">
+                      <label>Перемотка</label>
+                      <span id="potential-rewind-label" class="muted-val">origin</span>
+                    </div>
+                    <input id="potential-rewind-slider" type="range" min="0" max="0" step="1" value="0"
+                      style="width:100%;direction:rtl" disabled
+                      oninput="onPotentialRewindChange(this.value)">
+                    <small class="hint">Справа (0) — точка отсчёта, слева — глубже в историю (та же ориентация, что у оси времени графика).</small>
+                  </section>
+                </div>
+              </div>
+            </div>
+
+            <section class="panel-section">
+              <h4>История прогнозов</h4>
+              <div id="history-regime_mixture_potential"></div>
+            </section>
+
+          </div><!-- /tool-panel-regime_mixture_potential -->
+
+          <div id="tool-panel-range_forecast" style="display:none">
+
+            <div class="tool-panel-header">
+              <span class="tool-panel-title">Прогноз диапазона</span>
+              <button class="tool-show-toggle" id="range-forecast-show-chart-btn" onclick="toggleRangeForecastShowChart()"
+                title="Закрепить на графике (иначе видно, только пока этот инструмент активен)">
+                <svg class="icon"><use href="#icon-eye"/></svg>
+              </button>
+            </div>
+
+            <section class="panel-section">
+              <small class="hint">Прогноз коридора min(low)..max(high) на h=1..H шагов вперёд, БЕЗ прогноза
+                точки close — живой предпросмотр, пересчитывается при смене origin/настроек. Клик по графику
+                ставит точку отсчёта (origin); без клика — от последнего доступного бара.</small>
+              <div id="range-forecast-need-calibration" class="hint" style="display:none;color:var(--warn,#d29922);margin-top:6px">
+                Для этой комбинации H/p/theiler ещё нет калибровки — прогноз не показан. Нажмите
+                «Калибровать» ниже, либо переключитесь на «По умолчанию».
+              </div>
+            </section>
+
+            <div class="accordion">
+              <div class="accordion-item">
+                <button class="accordion-header" onclick="toggleAccordion(this)">
+                  <span class="accordion-arrow">▸</span> Параметры
+                </button>
+                <div class="accordion-body">
+
+                  <section class="panel-section">
+                    <h4>Метод</h4>
+                    <div class="field-row">
+                      <label>H (шагов вперёд)</label>
+                      <input id="range-forecast-h" type="number" value="5" min="1" max="60" onchange="onRangeForecastSettingsChange()">
+                    </div>
+                    <div class="field-row">
+                      <label>p (лагов Δratio)</label>
+                      <input id="range-forecast-p" type="number" value="8" min="3" max="150" onchange="onRangeForecastSettingsChange()">
+                    </div>
+                    <div class="field-row">
+                      <label>Окно Тайлера</label>
+                      <input id="range-forecast-theiler" type="number" value="5" min="1" max="150" onchange="onRangeForecastSettingsChange()">
+                    </div>
+                    <div class="field-row">
+                      <label>Параметры S-map</label>
+                      <select id="range-forecast-mode" onchange="onRangeForecastSettingsChange()">
+                        <option value="calibrated">Калиброванные</option>
+                        <option value="default">По умолчанию (θ=0, λ=0)</option>
+                      </select>
+                    </div>
+                    <div class="field-row checkbox-row">
+                      <label><input id="range-forecast-use-all-candles" type="checkbox" checked
+                        onchange="document.getElementById('range-forecast-max-candles').disabled = this.checked; onRangeForecastSettingsChange()"> Вся история</label>
+                    </div>
+                    <div class="field-row">
+                      <label>Свечей в истории</label>
+                      <input id="range-forecast-max-candles" type="number" value="5000" min="500" max="20000" step="500" onchange="onRangeForecastSettingsChange()" disabled>
+                    </div>
+                  </section>
+
+                  <section class="panel-section">
+                    <h4>Зоны вероятности</h4>
+                    <small class="hint">Каждый чекбокс — центральный интервал вокруг close (напр. «50%» = средние
+                      50% исходов). Включённые зоны накладываются друг на друга — узкая гуще в центре.</small>
+                    <div class="field-row checkbox-row">
+                      <label><input id="range-forecast-level-50" type="checkbox" checked onchange="onRangeForecastSettingsChange()"> 50%</label>
+                      <label><input id="range-forecast-level-75" type="checkbox" checked onchange="onRangeForecastSettingsChange()"> 75%</label>
+                      <label><input id="range-forecast-level-90" type="checkbox" checked onchange="onRangeForecastSettingsChange()"> 90%</label>
+                    </div>
+                  </section>
+
+                  <section class="panel-section">
+                    <h4>Калибровка θ+признаков</h4>
+                    <small class="hint">Многопроходный координатный спуск (θ + 5 λ-признаков:
+                      объём/тренд/скорость/ускорение/волатильность) + подбор квантиля чтения на каждый
+                      уровень, честная проверка на отложенной выборке. ~30-40с на дневных данных.</small>
+                    <button id="range-forecast-calibrate-btn" onclick="calibrateRangeForecast()" style="width:100%;margin-top:6px">
+                      Калибровать
+                    </button>
+                    <div id="range-forecast-calibration-result" style="margin-top:8px"></div>
+                  </section>
+
+                </div>
+              </div>
+            </div>
+
+          </div><!-- /tool-panel-range_forecast -->
+
+          <div id="tool-panel-risk_corridor" style="display:none">
+
+            <div class="tool-panel-header">
+              <span class="tool-panel-title">Риск-корридор</span>
+              <button class="tool-show-toggle" id="risk-corridor-show-chart-btn" onclick="toggleRiskCorridorShowChart()"
+                title="Закрепить на графике (иначе видно, только пока этот инструмент активен)">
+                <svg class="icon"><use href="#icon-eye"/></svg>
+              </button>
+            </div>
+
+            <section class="panel-section">
+              <small class="hint">Риск-огибающая High/Low (running max/min) + полоса Close на h=1..H шагов
+                вперёд — живой предпросмотр, пересчитывается при смене origin/настроек. Клик по графику ставит
+                точку отсчёта (origin); без клика — от последнего доступного бара. Метод: kNN по форме Δratio +
+                Student-t кернель + Monte Carlo, без калибровки — параметры глобальны и устойчиво обобщаются
+                на новые тикеры.</small>
+            </section>
+
+            <section class="panel-section">
+              <div class="field-row">
+                <label>Покрытие</label>
+                <span id="risk-corridor-coverage-label" class="muted-val">95%</span>
+              </div>
+              <input id="risk-corridor-coverage-slider" type="range" min="50" max="100" step="1" value="95"
+                style="width:100%" oninput="onRiskCorridorCoverageInput()">
+              <small class="hint">Уровень, ДОСТИГНУТЫЙ ценой к шагу h (max High / min Low за весь путь до h) —
+                риск-релевантно для стопов. Управляет ОБЕИМИ огибающими разом (полоса Close и риск-огибающая
+                High/Low).</small>
+            </section>
+
+            <div class="accordion">
+              <div class="accordion-item">
+                <button class="accordion-header" onclick="toggleAccordion(this)">
+                  <span class="accordion-arrow">▸</span> Параметры
+                </button>
+                <div class="accordion-body">
+                  <section class="panel-section">
+                    <div class="field-row">
+                      <label>H (шагов вперёд)</label>
+                      <input id="risk-corridor-h" type="number" value="20" min="1" max="60" onchange="onRiskCorridorSettingsChange()">
+                    </div>
+                    <div class="field-row">
+                      <label>p_fit (длина delay-вектора)</label>
+                      <input id="risk-corridor-p-fit" type="number" value="20" min="5" max="150" onchange="onRiskCorridorSettingsChange()">
+                    </div>
+                    <div class="field-row">
+                      <label>α (форма ↔ амплитуда)</label>
+                      <input id="risk-corridor-blend-alpha" type="number" value="0.75" min="0" max="1" step="0.05" onchange="onRiskCorridorSettingsChange()">
+                    </div>
+                    <div class="field-row">
+                      <label>θ (резкость взвешивания)</label>
+                      <input id="risk-corridor-theta" type="number" value="20" min="0.5" max="500" step="0.5" onchange="onRiskCorridorSettingsChange()">
+                    </div>
+                    <div class="field-row">
+                      <label>N_SIM (частиц)</label>
+                      <input id="risk-corridor-n-sim" type="number" value="15000" min="500" max="30000" step="500" onchange="onRiskCorridorSettingsChange()">
+                    </div>
+                    <div class="field-row">
+                      <label>Seed</label>
+                      <input id="risk-corridor-seed" type="number" value="42" step="1" onchange="onRiskCorridorSettingsChange()">
+                    </div>
+                    <div class="field-row checkbox-row">
+                      <label><input id="risk-corridor-use-all-candles" type="checkbox" checked
+                        onchange="document.getElementById('risk-corridor-max-candles').disabled = this.checked; onRiskCorridorSettingsChange()"> Вся история</label>
+                    </div>
+                    <div class="field-row">
+                      <label>Свечей в истории</label>
+                      <input id="risk-corridor-max-candles" type="number" value="5000" min="500" max="20000" step="500" onchange="onRiskCorridorSettingsChange()" disabled>
+                    </div>
+                    <small class="hint">Кернель — Student-t, nu=1.0 (фиксирован, не настраивается).</small>
+                  </section>
+                </div>
+              </div>
+            </div>
+
+            <section class="panel-section">
+              <div id="risk-corridor-result-summary"><span class="muted-val">—</span></div>
+            </section>
+
+          </div><!-- /tool-panel-risk_corridor -->
+
         </section>
 
       </div><!-- /tab-main -->
@@ -729,12 +1129,14 @@
         </section>
 
         <section class="panel-section">
-          <p class="muted-val" id="no-tool-selected-hint-osc">Выберите инструмент выше.</p>
+          <div id="tool-panel-none" style="display:none">
+            <p class="muted-val">Осциллятор выключен — выберите инструмент выше.</p>
+          </div>
 
           <div id="tool-panel-variance_osc" style="display:none">
             <div class="field-row">
               <label>Окно (баров)</label>
-              <input id="vo-window" type="number" value="200" min="10" max="2000" step="1" style="width:80px"
+              <input id="vo-window" type="number" class="no-spin" value="200" min="10" max="2000" step="1" style="width:80px"
                 oninput="onVarianceOscWindowInput(this.value)">
             </div>
             <input id="vo-window-range" type="range" min="10" max="2000" step="1" value="200"
@@ -752,15 +1154,9 @@
                 <option value="var">Дисперсия (resid_var)</option>
               </select>
             </div>
-            <div class="field-row checkbox-row">
-              <label><input id="vo-show-oscillator" type="checkbox" onchange="toggleVarianceOscillator()"> Показать осциллятор</label>
-            </div>
           </div>
 
           <div id="tool-panel-volume" style="display:none">
-            <div class="field-row checkbox-row">
-              <label><input id="vol-show-oscillator" type="checkbox" onchange="toggleVolumeDisplay()"> Показать осциллятор</label>
-            </div>
             <p class="muted-val" style="margin:2px 0 6px">
               Цвет бара — как у свечи (close ≥ open — зелёный, иначе красный).
             </p>
@@ -770,11 +1166,11 @@
             <div class="field-row">
               <label>Глубина (баров)</label>
               <input id="spectrogram-depth" type="number" value="500" min="0" max="20000" step="50"
-                title="0 = вся доступная история">
+                title="0 = вся доступная история" oninput="onSpectrogramSettingsChange()">
             </div>
             <div class="field-row">
               <label>Окно STFT</label>
-              <select id="spectrogram-nperseg" style="flex:1;width:auto">
+              <select id="spectrogram-nperseg" style="flex:1;width:auto" onchange="onSpectrogramSettingsChange()">
                 <option value="4">4</option>
                 <option value="8">8</option>
                 <option value="16">16</option>
@@ -790,10 +1186,11 @@
               <span id="spectrogram-overlap-label" class="muted-val">75%</span>
             </div>
             <input id="spectrogram-overlap" type="range" min="50" max="95" step="1" value="75"
-              style="width:100%" oninput="document.getElementById('spectrogram-overlap-label').textContent=this.value+'%'">
+              style="width:100%"
+              oninput="document.getElementById('spectrogram-overlap-label').textContent=this.value+'%'; onSpectrogramSettingsChange()">
             <div class="field-row">
               <label>Мин. частота</label>
-              <select id="spectrogram-fmin" style="flex:1;width:auto">
+              <select id="spectrogram-fmin" style="flex:1;width:auto" onchange="onSpectrogramSettingsChange()">
                 <option value="0" selected>0 (пост. составл.)</option>
                 <option value="0.0078125">128 бар</option>
                 <option value="0.015625">64 бара</option>
@@ -804,7 +1201,7 @@
             </div>
             <div class="field-row">
               <label>Макс. частота</label>
-              <select id="spectrogram-fmax" style="flex:1;width:auto">
+              <select id="spectrogram-fmax" style="flex:1;width:auto" onchange="onSpectrogramSettingsChange()">
                 <option value="0.5" selected>2 бара (Найквист)</option>
                 <option value="0.25">4 бара</option>
                 <option value="0.125">8 бар</option>
@@ -823,16 +1220,9 @@
             <div class="field-row checkbox-row">
               <label><input id="spectrogram-logy" type="checkbox" onchange="applySpectrogramContrast()"> Логарифмическая ось частот</label>
             </div>
-            <div class="field-row checkbox-row">
-              <label><input id="spectrogram-show" type="checkbox" onchange="toggleSpectrogramDisplay()"> Показать осциллятор</label>
-            </div>
             <div class="field-row">
               <span id="spectrogram-meta" class="muted-val">—</span>
             </div>
-            <button id="spectrogram-calculate-btn" onclick="calculateSpectrogram()" style="width:100%;margin-top:6px"
-              title="Каждый параметр выше меняет сам запрос к STFT — расчёт заново по кнопке, не мгновенный">
-              Рассчитать
-            </button>
           </div>
         </section>
 
@@ -841,6 +1231,36 @@
     </aside>
   </main>
 </div>
+
+<!-- Кастомный confirm() (project feedback 2026-08-25) — заменяет native
+     window.confirm(), стиль которого не подчиняется теме приложения и
+     отличается между Chrome/Firefox. -->
+<div id="dlg-overlay" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="dlg-title"></span>
+    </div>
+    <div class="modal-body" id="dlg-body"></div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="dialogCancelClick()">Отмена</button>
+      <button id="dlg-confirm-btn" onclick="dialogConfirmClick()">Удалить</button>
+    </div>
+  </div>
+</div>
+
+<!-- Band Lambda: "Пул" — один состав пула на (инструмент, интервал), не по T
+     (λ-калибровка и per-T наборы удалены 2026-09-12). -->
+<div id="bl-pool-overlay" class="modal-overlay hidden">
+  <div class="modal modal-medium">
+    <div class="modal-header">
+      <span class="modal-title">Пул Band Lambda</span>
+      <button class="icon-btn" onclick="closeBandPoolModal()" title="Закрыть"><svg class="icon"><use href="#icon-close"/></svg></button>
+    </div>
+    <div class="modal-body" id="bl-pool-detail"></div>
+  </div>
+</div>
+
+<div id="global-tooltip" role="tooltip"></div>
 
 <script type="module" src="/ui/app.js"></script>
 </body>

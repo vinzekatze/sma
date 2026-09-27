@@ -39,7 +39,7 @@ import numpy as np
 
 # ── дефолты (см. index.html simplex-panel / прототип app7-simplex-ensemble.py) ──
 
-DEFAULT_WINDOW = 10
+DEFAULT_WINDOW = 20  # project feedback 2026-08-25: "в итоге нащупал что он удобнее" (was 10)
 DEFAULT_HORIZON = 20
 DEFAULT_XY_X = 3
 DEFAULT_XY_Y = 0
@@ -468,6 +468,79 @@ def _aggregate(per_origin: list[dict]) -> dict:
     return {"mean_rel": mean_rel, "std_rel": std_rel, "p25": p25, "p75": p75}
 
 
+def _forecast_one_origin(
+    ratio_full: np.ndarray, a_arr: np.ndarray, b_arr: np.ndarray, price_input: np.ndarray,
+    origin: int, i: int, bars: int,
+    xy_x: int, xy_y: int, xi_add: int, n_levels: int, p_cascade_max: int,
+    d_values: list[int], blend_alpha: float, use_lp_corr: bool, horizon: int,
+) -> dict:
+    """
+    One origin_i's worth of run_multi_origin's per-origin loop, split out as
+    a top-level (picklable) function so it can run in a ProcessPoolExecutor
+    worker — see run_multi_origin's docstring for why each origin_i is safe
+    to compute independently. Returns either a "skipped" shape (`reason` key
+    present) or a full per_origin entry; run_multi_origin tells them apart
+    via `"reason" in result` when reassembling its two output lists.
+    """
+    origin_i = origin - i
+    if origin_i < 10:
+        return {"i": i, "origin_i": origin_i, "reason": "origin_i < 10 (мало истории)"}
+
+    ratio_i = ratio_full[: origin_i + 1]
+    if bars > 0:
+        ratio_i = ratio_i[max(0, len(ratio_i) - bars):]
+    origin_algo_i = len(ratio_i) - 1
+
+    a_i = float(a_arr[origin_i])
+    b_i = float(b_arr[origin_i])
+    origin_price_i = float(price_input[origin_i])
+
+    s2_results, s2_failed = run_stage2(
+        ratio_i, d_values, xy_x, xy_y, xi_add,
+        n_levels, horizon, origin_algo_i,
+        blend_alpha, p_cascade_max, use_lp_corr,
+    )
+    if not s2_results:
+        return {
+            "i": i, "origin_i": origin_i,
+            "reason": f"Этап 2: нет валидных d (d∈[{d_values[0]},{d_values[-1]}])",
+        }
+
+    fc_prices = []
+    for r in s2_results:
+        fp = r["fc_preds"]
+        price_j = np.array([
+            fp[j] * np.exp(a_i + b_i * (origin_i + 1 + j))
+            for j in range(len(fp))
+        ])
+        fc_prices.append(price_j)
+    avg_price_i = np.mean(fc_prices, axis=0)
+    rel_i = avg_price_i / origin_price_i - 1.0
+
+    return {
+        "i": i, "origin_i": origin_i,
+        "n_valid_d": len(s2_results), "n_total_d": len(d_values),
+        "origin_price": origin_price_i,
+        "avg_price": avg_price_i,
+        "rel": rel_i,
+    }
+
+
+def init_worker_env() -> None:
+    """
+    ProcessPoolExecutor initializer — BLAS oversubscription guard (see memory
+    blas_oversubscription_multiprocessing): each worker process must cap its
+    own thread pool BEFORE numpy touches BLAS, or N worker processes x N BLAS
+    threads each thrash the CPU instead of speeding anything up. Same fix as
+    range_forecast_calibrator.init_worker_env, duplicated (not imported) to
+    keep the model modules independent.
+    """
+    import os
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+
+
 def run_multi_origin(
     ratio_full: np.ndarray,
     a_arr: np.ndarray, b_arr: np.ndarray, price_input: np.ndarray,
@@ -476,6 +549,7 @@ def run_multi_origin(
     pca_p_range: tuple, pca_thr1: float, pca_thr2: float, blend_alpha: float,
     horizon: int, use_lp_corr: bool,
     progress_cb=None,
+    max_workers: int = 1,
 ) -> dict:
     """
     Прогоняет пайплайн (LP-фильтр → каскад → Simplex projection) для
@@ -485,6 +559,20 @@ def run_multi_origin(
 
     Этап 1 (PCA-sweep → d_min/d_max) считается ОДИН РАЗ по главному origin и
     переиспользуется для всех origin_i в окне.
+
+    Каждый origin_i независим от остальных (свои ratio_i/origin_algo_i,
+    читает только общие read-only d_values/ratio_full/a_arr/b_arr) — при
+    max_workers>1 window origin'ов считаются в ProcessPoolExecutor (project
+    feedback 2026-08-25: "можем ввести многопоточность для него, а то он
+    долго считается"), initializer=init_worker_env (BLAS thread cap на
+    процесс, тот же приём, что и калибровка band_lambda). max_workers<=1
+    (умолчание) — старый последовательный путь без накладных расходов на
+    процессы, важно для маленьких window и для вызова без multiprocessing
+    (напр. будущие тесты). Порядок progress_cb-вызовов при max_workers>1 не
+    гарантированно по возрастанию i (futures завершаются в порядке
+    готовности) — это только счётчик done/window для UI, порядок финальных
+    per_origin/skipped списков ниже всегда восстанавливается по i, как в
+    последовательном пути.
 
     Возвращает dict с per_origin (список по origin, каждый с "rel" —
     относительной траекторией rel_i(h) = price_i(h)/origin_price_i − 1) либо
@@ -502,55 +590,43 @@ def run_multi_origin(
         return {"error": "Этап 1 (по главному origin): не удалось определить d_min/d_max.", "skipped": []}
     d_values = list(range(d_min, d_max + 1))
 
-    per_origin = []
-    skipped: list[dict] = []
-
-    for i in range(window):
-        origin_i = origin - i
-        if origin_i < 10:
-            skipped.append({"origin_i": origin_i, "reason": "origin_i < 10 (мало истории)"})
-            continue
-
-        ratio_i = ratio_full[: origin_i + 1]
-        if bars > 0:
-            ratio_i = ratio_i[max(0, len(ratio_i) - bars):]
-        origin_algo_i = len(ratio_i) - 1
-
-        a_i = float(a_arr[origin_i])
-        b_i = float(b_arr[origin_i])
-        origin_price_i = float(price_input[origin_i])
-
-        s2_results, s2_failed = run_stage2(
-            ratio_i, d_values, xy_x, xy_y, xi_add,
-            n_levels, horizon, origin_algo_i,
-            blend_alpha, p_cascade_max, use_lp_corr,
-        )
-        if not s2_results:
-            skipped.append({"origin_i": origin_i, "reason": f"Этап 2: нет валидных d (d∈[{d_min},{d_max}])"})
+    results_by_i: dict[int, dict] = {}
+    if max_workers > 1 and window > 1:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        with ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker_env) as executor:
+            futures = {
+                executor.submit(
+                    _forecast_one_origin,
+                    ratio_full, a_arr, b_arr, price_input, origin, i, bars,
+                    xy_x, xy_y, xi_add, n_levels, p_cascade_max, d_values,
+                    blend_alpha, use_lp_corr, horizon,
+                ): i
+                for i in range(window)
+            }
+            done = 0
+            for fut in as_completed(futures):
+                results_by_i[futures[fut]] = fut.result()
+                done += 1
+                if progress_cb:
+                    progress_cb(done, window)
+    else:
+        for i in range(window):
+            results_by_i[i] = _forecast_one_origin(
+                ratio_full, a_arr, b_arr, price_input, origin, i, bars,
+                xy_x, xy_y, xi_add, n_levels, p_cascade_max, d_values,
+                blend_alpha, use_lp_corr, horizon,
+            )
             if progress_cb:
                 progress_cb(i + 1, window)
-            continue
 
-        fc_prices = []
-        for r in s2_results:
-            fp = r["fc_preds"]
-            price_j = np.array([
-                fp[j] * np.exp(a_i + b_i * (origin_i + 1 + j))
-                for j in range(len(fp))
-            ])
-            fc_prices.append(price_j)
-        avg_price_i = np.mean(fc_prices, axis=0)
-        rel_i = avg_price_i / origin_price_i - 1.0
-
-        per_origin.append({
-            "i": i, "origin_i": origin_i,
-            "n_valid_d": len(s2_results), "n_total_d": len(d_values),
-            "origin_price": origin_price_i,
-            "avg_price": avg_price_i,
-            "rel": rel_i,
-        })
-        if progress_cb:
-            progress_cb(i + 1, window)
+    per_origin = []
+    skipped: list[dict] = []
+    for i in range(window):
+        r = results_by_i[i]
+        if "reason" in r:
+            skipped.append({"origin_i": r["origin_i"], "reason": r["reason"]})
+        else:
+            per_origin.append(r)
 
     if not per_origin:
         return {"error": "Ни один origin не дал валидного прогноза.", "skipped": skipped, "d_min": d_min, "d_max": d_max}
@@ -580,12 +656,16 @@ def forecast_ensemble(
     pca_thr1: float = DEFAULT_PCA_THR1, pca_thr2: float = DEFAULT_PCA_THR2,
     use_lp_corr: bool = DEFAULT_USE_LP_CORR,
     progress_cb=None,
+    max_workers: int = 1,
 ) -> dict:
     """
     Полный пайплайн от close/times до result_json-контракта (см. докстринг
     модуля sma/api/task_manager.py::_run_forecast_simplex). origin = len(close)-1
     (последний бар переданных массивов — причинность обеспечена обрезкой на
     вызывающей стороне, не здесь).
+
+    max_workers — прокидывается в run_multi_origin как есть (см. его
+    докстринг); >1 распараллеливает per-origin цикл через ProcessPoolExecutor.
 
     Возвращает {"error": "..."} при неустранимой ошибке — вызывающий код
     (task_manager) должен проверить это и поднять ValueError с этим текстом.
@@ -603,6 +683,7 @@ def forecast_ensemble(
         pca_p_range, pca_thr1, pca_thr2, blend_alpha,
         horizon, use_lp_corr,
         progress_cb=progress_cb,
+        max_workers=max_workers,
     )
     if "error" in mo:
         return mo
@@ -615,7 +696,6 @@ def forecast_ensemble(
         "origin_date": origin_date,
         "origin_extreme_date": origin_date,  # нет пивота — origin сам себе "экстремум"
         "origin_price": origin_price,
-        "close_at_origin": origin_price,
         "origin_direction": 1 if float(agg["mean_rel"][-1]) >= 0 else -1,
         "horizon": horizon, "window": window,
         "d_min": mo["d_min"], "d_max": mo["d_max"],

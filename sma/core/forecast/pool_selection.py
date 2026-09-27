@@ -7,9 +7,11 @@ the category map / thresholds / defaults below (measured 2026-07-31 — a
 snapshot, not a constant; re-measure if numbers drift far from that table).
 
 resolve_pool_candidates() does NOT touch the DB and does NOT persist
-anything — it is a pure MOEX-ISS-facing function, called from both
-/forecast-settings/calibrate (resolving the pool before queuing candle_fetch
-tasks) and run_pretest_task (5.2b) — one source of truth, per the plan.
+anything — it is a pure MOEX-ISS-facing function, called from
+POST /forecast-settings/pool and POST /forecast-settings/resolve-pool (see
+sma/api/routes/forecast_settings.py:_resolve_and_upsert_pool, which wraps
+it with a TTL cache — pool_resolution_cache) — one source of truth, per
+the plan.
 
 Liquidity ranking note: the plan's research mentions a cheap "few requests"
 resolution using board-level marketdata (VALTODAY/VOLTODAY). That MOEX ISS
@@ -61,10 +63,10 @@ DEFAULT_MAX_WORKERS = 16       # concurrent download_candles calls — fallback 
 def compute_pool_key(categories: list[str], n: int) -> str:
     """
     Deterministic string from a pool config — same categories (any order) +
-    n always produce the same key. Part of forecast_settings' UNIQUE
-    constraint (docs/plans/band_forecast_migration_plan.md 5.1): lets
-    several pool compositions for the same T coexist (e.g. "stock:25" vs
-    "metal+stock:25") and be compared instead of silently overwriting.
+    n always produce the same key. Used as pool_resolution_cache's cache
+    key, and stored in pool_config purely as a human-readable label (e.g.
+    "stock:25", "metal+stock:25") — band_lambda_pool itself is keyed on
+    (instrument_id, interval) only, one pool per instrument now.
     """
     return "+".join(sorted(categories)) + f":{n}"
 

@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 import aiosqlite
 
-from sma.core.db import get_task, list_tasks
+from sma.core.db import get_task, list_tasks, delete_task
 from sma.api.deps import get_db, get_task_manager
 from sma.api.task_manager import TaskManager
 
@@ -64,6 +64,26 @@ async def resume_task(
     if not ok:
         raise HTTPException(422, "Task not found or not in a resumable state")
     return {"task_id": task_id}
+
+
+@router.delete("/{task_id}", status_code=204)
+async def delete_task_route(
+    task_id: int,
+    db: aiosqlite.Connection = Depends(get_db),
+):
+    """
+    Removes one task row — terminal states only (pending/running are
+    actively managed by TaskManager; cancel first). 'done' rows already
+    age out on their own (see prune_old_done_tasks) but an explicit delete
+    is harmless there too; cancelled/interrupted/error rows never
+    auto-prune, so this is the only way to clear them.
+    """
+    row = await get_task(db, task_id)
+    if row is None:
+        raise HTTPException(404, "Task not found")
+    if row["status"] in ("pending", "running"):
+        raise HTTPException(422, f"Cannot delete a task in status {row['status']!r} — cancel it first")
+    await delete_task(db, task_id)
 
 
 @router.websocket("/{task_id}/ws")

@@ -18,7 +18,10 @@ from fastapi.staticfiles import StaticFiles
 import sma.api.deps as _deps
 from sma.core.db import init_db
 from sma.api.task_manager import TaskManager
-from sma.api.routes import instruments, candles, forecasts, forecast_settings, display_presets, tasks, series, settings
+from sma.api.routes import (
+    instruments, candles, forecasts, forecast_settings, display_presets, tasks, series, settings,
+    range_forecast, risk_corridor,
+)
 
 _UI_DIR = Path(__file__).parent.parent / "ui"
 
@@ -48,6 +51,8 @@ app.include_router(display_presets.router,   prefix="/display-presets",   tags=[
 app.include_router(tasks.router,             prefix="/tasks",             tags=["tasks"])
 app.include_router(series.router,            prefix="/series",            tags=["series"])
 app.include_router(settings.router,          prefix="/settings",          tags=["settings"])
+app.include_router(range_forecast.router,    prefix="/range-forecast",    tags=["range-forecast"])
+app.include_router(risk_corridor.router,     prefix="/risk-corridor",     tags=["risk-corridor"])
 
 
 @app.get("/", include_in_schema=False)
