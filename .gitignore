@@ -11,8 +11,9 @@ __pycache__/
 *.db-shm
 *.db-wal
 
-# Data caches (re-fetchable from MOEX)
-data/
+# Data caches (re-fetchable from MOEX) — anchored to repo root only,
+# a bare "data/" also matches sma/data/ (the actual moex data-source package!)
+/data/
 
 # Local Claude Code config / notes (not needed by other contributors)
 .claude/

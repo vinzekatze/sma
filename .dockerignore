@@ -6,9 +6,7 @@ __pycache__
 *.db
 *.db-shm
 *.db-wal
-data/
+/data/
 docs/
-prototype/
-tests/
 .git
 *.md
