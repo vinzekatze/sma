@@ -12,6 +12,7 @@ from sma.core.db import (
     get_instrument_by_id,
     list_instruments,
     set_favorite,
+    set_instrument_trading_params,
     delete_instrument,
     list_instrument_coverage,
 )
@@ -124,7 +125,15 @@ async def search_instruments(
 
     loop = asyncio.get_running_loop()
     hits = await loop.run_in_executor(None, _run)
-    added = {row["ticker"] for row in await list_instruments(db, include_pool=True) if row["data_source"] == "moex"}
+    # include_pool deliberately omitted (defaults to manual-only) — a pool-
+    # selected ticker (added_via='pool') is NOT "already added" from the
+    # user's point of view (see upsert_instrument's docstring: a user who
+    # finds it here should be able to "claim" it into "Мои тикеры"), only a
+    # manually-added one is. Marking pool tickers already_added=True here
+    # used to disable their "+ Добавить" button outright, making them
+    # un-claimable through this search (project report 2026-10-04: "AFKS —
+    # пишет 'добавлен', хотя в списке его нет").
+    added = {row["ticker"] for row in await list_instruments(db) if row["data_source"] == "moex"}
     return [{**hit, "already_added": hit["secid"] in added} for hit in hits]
 
 
@@ -141,7 +150,8 @@ async def board_instruments(
     hits = await loop.run_in_executor(
         None, lambda: list_board_securities(engine, market, board)
     )
-    added = {row["ticker"] for row in await list_instruments(db, include_pool=True) if row["data_source"] == "moex"}
+    # include_pool deliberately omitted — see /search's identical line above.
+    added = {row["ticker"] for row in await list_instruments(db) if row["data_source"] == "moex"}
     return [{**hit, "already_added": hit["secid"] in added} for hit in hits]
 
 
@@ -150,6 +160,7 @@ async def create_instrument(body: InstrumentIn, db: aiosqlite.Connection = Depen
     iid = await upsert_instrument(
         db, body.ticker, body.data_source, body.asset_type, body.full_name,
         engine=body.engine, market=body.market, board=body.board,
+        added_via="manual",
     )
     row = await get_instrument_by_id(db, iid)
     return _to_out(row)
@@ -195,3 +206,34 @@ async def get_coverage(instrument_id: int, db: aiosqlite.Connection = Depends(ge
     if row is None:
         raise HTTPException(404, "Instrument not found")
     return await list_instrument_coverage(db, instrument_id)
+
+
+@router.get("/{instrument_id}/trading-params")
+async def get_trading_params_route(instrument_id: int, db: aiosqlite.Connection = Depends(get_db)):
+    """
+    Shares-per-lot + price rounding step (MINSTEP) for the risk-management
+    tool's position sizing/price rounding (project request 2026-10-04:
+    both should come from MOEX, not be manually typed). Cached on
+    instruments.lot_size/price_step after the first call — a real split or
+    step change is rare enough that refetching on every tool open would
+    just be a wasted MOEX round-trip. Non-MOEX sources (none exist yet, but
+    the columns are nullable for any future one) get hardcoded fallbacks
+    rather than a concept that doesn't apply to them.
+    """
+    row = await get_instrument_by_id(db, instrument_id)
+    if row is None:
+        raise HTTPException(404, "Instrument not found")
+    if row["data_source"] != "moex":
+        return {"lot_size": 1, "price_step": 0.01}
+    if row["lot_size"] is not None and row["price_step"] is not None:
+        return {"lot_size": row["lot_size"], "price_step": row["price_step"]}
+
+    from sma.data.moex import get_trading_params
+
+    loop = asyncio.get_running_loop()
+    try:
+        params = await loop.run_in_executor(None, get_trading_params, row["ticker"])
+    except Exception as e:
+        raise HTTPException(502, f"MOEX недоступен: {e}")
+    await set_instrument_trading_params(db, instrument_id, params["lot_size"], params["price_step"])
+    return params

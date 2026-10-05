@@ -2,7 +2,7 @@ import { S } from './state.js';
 import { api, setBusy, setIdle } from './api.js';
 import { renderChart } from './chart.js';
 import { registerTool, activateTool } from './tools.js';
-import { hexToRgba } from './color_utils.js';
+import { saveToolDisplayDefaults } from './settings.js';
 
 // ── Анализ tab: spectrogram analyzer ────────────────────────────────────
 // See sma/core/analysis/spectrogram.py. Settings live here; recomputes
@@ -51,36 +51,56 @@ function applySpectrogramSettings(p) {
   S.spectrogramSettings = p;
 }
 
-// Last-used settings for this (instrument, interval) — see db.py
-// analysis_settings table docstring. Called on ticker/interval switch
-// (app.js:loadCandles); falls back to the hardcoded form defaults (index.html
-// value= attributes / state.js) when nothing is saved yet.
+// Last-used EXPENSIVE (backend STFT) settings for this (instrument,
+// interval) — depth/nperseg/overlap/fmin/fmax, see db.py analysis_settings
+// table docstring. contrastPct/logY are GLOBAL instead (project request
+// 2026-10-04 — purely visual, no reason to differ per ticker), merged in
+// from S.toolDisplayDefaults.spectrogram AFTER the per-ticker fetch so they
+// always win regardless of what an older per-ticker row still carries.
+// Called on ticker/interval switch (app.js:loadCandles); falls back to the
+// hardcoded form defaults (index.html value= attributes / state.js) when
+// nothing is saved yet.
 export async function loadSpectrogramDefaults() {
   if (!S.instrumentId) return;
+  let perTicker = { depthBars: 500, nperseg: 16, overlapPct: 95, fmin: 0, fmax: 0.5 };
   try {
     const res = await api(
       'GET',
       `/series/analysis-settings?instrument_id=${S.instrumentId}&interval=${S.interval}&analyzer_type=spectrogram`
     );
-    if (res.params) applySpectrogramSettings(res.params);
+    if (res.params) {
+      perTicker = {
+        depthBars: res.params.depthBars, nperseg: res.params.nperseg, overlapPct: res.params.overlapPct,
+        fmin: res.params.fmin, fmax: res.params.fmax,
+      };
+    }
   } catch (_) { /* non-fatal — keeps current form values */ }
+  applySpectrogramSettings({ ...perTicker, ...S.toolDisplayDefaults.spectrogram });
 }
 
-// Client-saved (the backend never sees contrastPct/logY — pure display
-// params computed client-side, see module docstring) — fire-and-forget,
-// mirrors band_lambda's applyDisplaySettings save pattern. Debounced: the
-// contrast slider fires this on every `oninput` tick while dragging.
+// Per-ticker half only — depth/nperseg/overlap/fmin/fmax, see
+// loadSpectrogramDefaults. Debounced: several of these fire on every
+// `oninput` tick while dragging.
 let _spectrogramSaveTimer = null;
 
 function saveSpectrogramSettings() {
   if (!S.instrumentId) return;
   clearTimeout(_spectrogramSaveTimer);
   _spectrogramSaveTimer = setTimeout(() => {
+    const s = S.spectrogramSettings;
     api('POST', '/series/analysis-settings', {
       instrument_id: S.instrumentId, interval: S.interval,
-      analyzer_type: 'spectrogram', params: S.spectrogramSettings,
+      analyzer_type: 'spectrogram',
+      params: { depthBars: s.depthBars, nperseg: s.nperseg, overlapPct: s.overlapPct, fmin: s.fmin, fmax: s.fmax },
     }).catch(() => {});
   }, 500);
+}
+
+// Global half — contrastPct/logY. settings.js:saveToolDisplayDefaults owns
+// the actual debounce/POST, shared across every tool using this mechanism.
+function saveGlobalSpectrogramDisplay() {
+  S.toolDisplayDefaults.spectrogram = { logY: S.spectrogramSettings.logY, contrastPct: S.spectrogramSettings.contrastPct };
+  saveToolDisplayDefaults();
 }
 
 export async function calculateSpectrogram() {
@@ -137,7 +157,7 @@ export function applySpectrogramContrast() {
   S.spectrogramSettings.contrastPct = +document.getElementById('spectrogram-contrast').value;
   S.spectrogramSettings.logY = document.getElementById('spectrogram-logy').checked;
   redraw();
-  saveSpectrogramSettings();
+  saveGlobalSpectrogramDisplay();
 }
 
 // ── registry entries: subpanel traces/shapes (moved out of chart.js so
@@ -190,23 +210,6 @@ function buildSpectrogramSubpanelTraces() {
   }];
 }
 
-// Horizontal dotted reference lines at the filter-bank C0..C5 band edges
-// (see sma/core/analysis/spectrogram.py:filter_bank_cutoffs) — only within
-// the currently visible frequency range.
-function buildSpectrogramCutoffShapes() {
-  if (!S.spectrogramData) return [];
-  const freqs = S.spectrogramData.freqs;
-  if (!freqs.length) return [];
-  const fLo = freqs[0], fHi = freqs[freqs.length - 1];
-  return S.spectrogramData.cutoffs
-    .filter(c => c.freq >= fLo && c.freq <= fHi)
-    .map(c => ({
-      type: 'line', xref: 'paper', yref: 'y2',
-      x0: 0, x1: 1, y0: c.freq, y1: c.freq,
-      line: { color: hexToRgba(S.colorProfile.spectrogram_cutoff_line, 0.75), width: 1, dash: 'dot' },
-    }));
-}
-
 // yaxis2 policy (project feedback 2026-08-20, §3.3 of docs/plans/
 // frontend_improvements_plan.md): fully fixed — "незачем" to zoom/pan a
 // frequency axis whose range is already exactly what fmin/fmax on the
@@ -230,7 +233,6 @@ registerTool({
   panelId: 'tool-panel-spectrogram',
   onSelected: onSpectrogramSelected,
   buildSubpanelTraces: buildSpectrogramSubpanelTraces,
-  buildSubpanelShapes: buildSpectrogramCutoffShapes,
   subpanelYAxisPolicy: spectrogramYAxisPolicy,
   // no buildMainTraces/buildOriginShape/onOriginClick/resetOrigin —
   // spectrogram never draws on the main chart and has no origin concept.

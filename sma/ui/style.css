@@ -143,6 +143,9 @@ main { display: flex; flex: 1; overflow: hidden; }
   position: relative;
 }
 #chart { width: 100%; height: 100%; }
+/* risk_calculator.js's "Установить на графике" — armed while S.riskCalcPickTarget
+   is set, see toggleRiskCalcPickOnChart */
+#chart.picking-price { cursor: crosshair; }
 
 /* Ценовой уровень: линия наведения + ВСЕ подписи цены (зафиксированные/
    pending/наведение) — обычный HTML/CSS-оверлей поверх Plotly, а не его
@@ -211,6 +214,46 @@ main { display: flex; flex: 1; overflow: hidden; }
   border-radius: 2px;
   white-space: nowrap;
 }
+
+/* Калькулятор риска (risk_calculator.js) — тот же HTML/CSS-оверлей поверх
+   Plotly, что и у ценового уровня (см. #price-level-overlay выше), ТЕ ЖЕ
+   позиции подписи (справа) — но СПЛОШНЫЕ линии (не точечные, как у
+   зафиксированных ценовых уровней), цвет отличает вход/стоп/тейк от
+   произвольного ценового уровня на том же графике. */
+#risk-calc-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.risk-calc-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1.5px solid;
+}
+.risk-calc-line.dashed { border-top-style: dashed; }
+.risk-calc-label {
+  position: absolute;
+  right: 4px;
+  top: -13px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 3px;
+  background: rgba(13, 17, 23, 0.6);
+  border-radius: 2px;
+  white-space: nowrap;
+}
+
+/* Калькулятор риска — поле входа/стопа/тейка + компактные кнопки-иконки
+   ("Текущая цена" / "Установить на графике") в одной строке, прижаты к
+   правому краю (та же сторона, где у обычного .field-row сидит один
+   input). Поле уже .spin-input-wrap's обычного 90px-дефолта — ширина
+   задаётся ПРЯМО на input (index.html), не здесь: только так она
+   переживает runtime-обёртку спиннера (см. комментарий у
+   .spin-input-wrap). */
+.rc-input-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; flex-grow: 1; flex-shrink: 0; }
 
 /* ── panel ── */
 #panel {
@@ -635,10 +678,48 @@ main { display: flex; flex: 1; overflow: hidden; }
   gap: var(--space-2);
   margin-bottom: 6px;
 }
+/* Long label + fixed-width control in a flex row: BOTH flex items default
+   to flex-shrink:1, so whenever the two together don't fit the panel's
+   width, the browser shrinks them PROPORTIONALLY — including the INPUT,
+   right past its own specified 90px, down to whatever's left after the
+   label (measured 2026-10-04 via a headless pass over every panel: a short
+   label like "Seed" left the input at its full 90px, a long one like
+   "N_LOOKBACK (доп. origin консенсуса)" squeezed the SAME input down to
+   58px — width ended up inversely tied to label LENGTH, not a fixed value,
+   across potential/simplex/risk_corridor panels alike). The fix is
+   one-sided: flex-shrink:0 on the CONTROL (below), NOT the label — the
+   label keeps the default flex-shrink:1 and just wraps onto a second line
+   when it's the one running out of room (plain text, no white-space:nowrap
+   set, wraps by default), while the control's width now never moves. */
 .field-row label { color: var(--muted); }
 .field-row input[type="number"],
 .field-row input[type="text"] {
   width: 90px;
+  flex-shrink: 0;
+}
+/* select never got a .field-row-level width rule the way number/text inputs
+   did — some panels patched it per-element (style="flex:1;width:auto"),
+   most didn't, so a <select>'s rendered width ended up wherever its
+   longest <option> text happened to push it: narrow for a two-word choice,
+   very wide for a long one, no two panels matching (project feedback
+   2026-10-04: "неоправданно разного размера"). Unlike the number/text input
+   rule above, this one does NOT disable shrinking: a <select>'s own
+   min-content width is its LONGEST option's text (it can't wrap the way a
+   label can), so flex-shrink:0 here just moves the overflow from "input
+   too narrow" to "select pokes out past the panel's right edge" for any
+   option text long enough (project feedback 2026-10-04: "Параметры S-map"
+   in Прогноз диапазона, same for every oscillator mode select). min-width:0
+   + text-overflow:ellipsis lets it shrink as far as the row needs and
+   truncate the CLOSED control's text instead — the open dropdown list
+   still shows each option's full text untruncated, only the collapsed
+   selection display is capped. */
+.field-row select {
+  flex-grow: 1;
+  width: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .checkbox-row { justify-content: flex-start; gap: var(--space-2); }
 .checkbox-row label { color: var(--text); cursor: pointer; }
@@ -722,7 +803,7 @@ main { display: flex; flex: 1; overflow: hidden; }
 }
 .result-row:last-child { border-bottom: none; }
 .result-key   { color: var(--muted); }
-.result-val   { font-weight: 600; }
+.result-val   { font-weight: 600; text-align: right; }
 .result-val.up   { color: var(--green); }
 .result-val.down { color: var(--red); }
 
@@ -925,10 +1006,28 @@ input[type="number"]::-webkit-inner-spin-button {
   margin: 0;
 }
 
+/* Width lives HERE, not on the input (which is just width:100% of this
+   box, below) — spin_input.js wraps every input[type=number] at runtime,
+   moving any inline width the input had onto this wrapper (see its own
+   docstring) but leaving nothing behind for the MANY inputs that relied on
+   .field-row's class-based 90px instead: with no inline width to inherit
+   and no width of its own, an inline-flex box falls back to its content's
+   natural preferred size — the browser's default ~20ch input width, not
+   90px. .field-row input[type=number]'s 90px rule never actually reached
+   the rendered element for any wrapped field, only for the handful of
+   .no-spin ones (never wrapped at all) — THE reason field widths looked
+   "случайно разного размера" across panels (project feedback 2026-10-04).
+   This default matches that originally-intended 90px (+ room for the
+   spin buttons' own 16px gutter); an input that genuinely needs a
+   different width still sets it inline on itself (e.g. risk_calculator.js's
+   narrower entry/stop/tp, which sit alongside extra icon buttons) — that
+   inline style still wins here exactly as before. */
 .spin-input-wrap {
   position: relative;
   display: inline-flex;
   vertical-align: middle;
+  width: 90px;
+  flex-shrink: 0; /* same reasoning as .field-row input[type=number] above — the label wraps, this doesn't shrink */
 }
 .spin-input-wrap input[type="number"] {
   width: 100%;

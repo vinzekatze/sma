@@ -118,6 +118,45 @@ def list_board_securities(
     ]
 
 
+def get_trading_params(secid: str) -> dict:
+    """
+    Shares per lot (LOTSIZE) + minimum price increment (MINSTEP), from MOEX
+    ISS's per-security DESCRIPTION block (/securities/{secid}.json?
+    iss.only=description) — a flat name/value row set, independent of which
+    board the ticker trades on (unlike the per-board `boards` collection
+    get_security_history_range reads). One request covers both fields —
+    used by the risk-management tool (sma/api/routes/instruments.py) to
+    size positions in whole lots AND round entry/stop/take-profit to a
+    price MOEX will actually accept, cached on instruments.lot_size/
+    price_step after the first call. Falls back to lot_size=1/price_step=
+    0.01 for whichever row is missing — some instrument types (currencies,
+    indices) don't carry LOTSIZE, and MINSTEP is occasionally absent too.
+    """
+    resp = requests.get(
+        f"{BASE_URL}/securities/{secid}.json",
+        params={"iss.meta": "off", "iss.only": "description"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    block = resp.json()["description"]
+    rows = [dict(zip(block["columns"], row)) for row in block["data"]]
+
+    lot_size, price_step = 1, 0.01
+    for row in rows:
+        name = row.get("name")
+        if name == "LOTSIZE":
+            try:
+                lot_size = int(row["value"])
+            except (TypeError, ValueError):
+                pass
+        elif name == "MINSTEP":
+            try:
+                price_step = float(row["value"])
+            except (TypeError, ValueError):
+                pass
+    return {"lot_size": lot_size, "price_step": price_step}
+
+
 def get_security_history_range(secid: str) -> list[dict]:
     """
     Per-security board coverage (engine/market/board + history_from/

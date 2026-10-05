@@ -20,6 +20,12 @@ class AppSettingsIn(BaseModel):
     # edited. See sma/core/db.py:save_app_settings/DEFAULT_COLOR_PROFILE for
     # the fixed role keys (docs/plans/frontend_improvements_plan.md §1.1a).
     color_profile: dict | None = None
+    # Same "None = leave alone" convenience, one level deeper (per-tool
+    # dict) — see sma/core/db.py:DEFAULT_TOOL_DISPLAY. Written by
+    # settings.js:saveToolDisplayDefaults whenever a trend_ruler/
+    # simplex_ensemble/regime_mixture_potential GLOBAL display toggle
+    # changes (project request 2026-10-04).
+    tool_display: dict | None = None
 
 
 @router.get("")
@@ -29,4 +35,7 @@ async def get_settings(db: aiosqlite.Connection = Depends(get_db)):
 
 @router.post("")
 async def set_settings(body: AppSettingsIn, db: aiosqlite.Connection = Depends(get_db)):
-    return await save_app_settings(db, body.moex_pool_workers, body.calibration_workers, body.chart_window_bars, body.color_profile)
+    return await save_app_settings(
+        db, body.moex_pool_workers, body.calibration_workers, body.chart_window_bars,
+        body.color_profile, body.tool_display,
+    )

@@ -30,7 +30,8 @@ registerTool({
   icon: 'risk',
   label: 'Риск-корридор (High/Low)',
   panelId: 'tool-panel-risk_corridor',
-  onOriginClick: onRiskCorridorOriginClick,
+  onOriginClick: setOrigin,
+  onMainOriginChanged: recalcRiskCorridorLive,
   onSelected: recalcRiskCorridorLive, // первый показ инструмента — сразу живой прогноз, без ожидания клика/смены настройки
   buildMainTraces: buildRiskCorridorMainTraces,
 });
@@ -52,11 +53,6 @@ function updateRiskCorridorShowChartButton() {
 
 function isRiskCorridorVisible() {
   return isToolObjectVisible('risk_corridor', S.riskCorridorShowOnChart);
-}
-
-function onRiskCorridorOriginClick(ts) {
-  setOrigin(ts);
-  recalcRiskCorridorLive();
 }
 
 // ── settings form <-> S.riskCorridorSettings ────────────────────────────

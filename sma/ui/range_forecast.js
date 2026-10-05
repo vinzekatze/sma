@@ -39,7 +39,8 @@ registerTool({
   icon: 'range',
   label: 'Прогноз диапазона (H шагов)',
   panelId: 'tool-panel-range_forecast',
-  onOriginClick: onRangeForecastOriginClick,
+  onOriginClick: setOrigin,
+  onMainOriginChanged: recalcRangeForecastLive,
   onSelected: recalcRangeForecastLive, // первый показ инструмента — сразу живой прогноз, без ожидания клика/смены настройки
   buildMainTraces: buildRangeForecastMainTraces,
 });
@@ -62,11 +63,6 @@ function updateRangeForecastShowChartButton() {
 
 function isRangeForecastVisible() {
   return isToolObjectVisible('range_forecast', S.rangeForecastShowOnChart);
-}
-
-function onRangeForecastOriginClick(ts) {
-  setOrigin(ts);
-  recalcRangeForecastLive();
 }
 
 // ── settings form <-> S.rangeForecastSettings ───────────────────────────

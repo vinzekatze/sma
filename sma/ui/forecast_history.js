@@ -34,6 +34,26 @@ import { savePinnedForecastIds } from './local_prefs.js';
 // strings themselves, to fetch/render one history+results pair per model.
 const MODEL_TYPES = ['band_lambda', 'simplex_ensemble', 'regime_mixture_potential'];
 
+// Every results panel this module can show into — the three models above
+// plus object_select's own peek panel (showResultsFor routes there while
+// that tool is active, see resultsTargetFor below).
+const ALL_RESULT_PANELS = [...MODEL_TYPES, 'object_select'];
+
+// Called from app.js on every ticker switch, right alongside the
+// S.historyForecasts/S.selectedForecastId reset — refreshHistory()'s
+// renderHistoryList only ever touches the history LIST (#history-<type>),
+// never the detail panel (#results-<type>) above it, so without this the
+// previously viewed ticker's forecast detail stayed visible (display:'')
+// with its stale content until a forecast was explicitly selected on the
+// new ticker — reported as "activating the forecast tool on a ticker with
+// no forecasts yet still shows the old ticker's result" (2026-10-04).
+export function hideAllForecastResults() {
+  for (const modelType of ALL_RESULT_PANELS) {
+    const section = document.getElementById(`results-section-${modelType}`);
+    if (section) section.style.display = 'none';
+  }
+}
+
 const _modelHandlers = {}; // modelType -> {onSelected(f)}
 
 // Registered once at startup (app.js) — e.g. band_lambda wants selecting one

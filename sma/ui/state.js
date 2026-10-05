@@ -36,9 +36,6 @@ export const S = {
     next_origin_marker: '#58a6ff',
     trend_ruler_line: '#1f77b4',
     trend_ruler_origin: '#bc8cff',
-    trend_ruler_accel_up: '#2ca02c',
-    trend_ruler_accel_down: '#d62728',
-    trend_ruler_accel_line: '#7f7f7f',
     ma_palette: ['#f0883e', '#a5d6ff', '#d2a8ff', '#7ee787', '#ffa198', '#79c0ff'],
     zigzag_tool_palette: ['#d29922', '#f0883e', '#a5d6ff', '#7ee787', '#ffa198', '#d2a8ff'],
     forecast_zigzag: '#d29922',
@@ -56,13 +53,49 @@ export const S = {
     risk_corridor_close: '#ffffff',
     risk_corridor_high: '#26a69a',
     risk_corridor_low: '#ef5350',
+    risk_calc_entry: '#58a6ff',
+    risk_calc_stop: '#f85149',
+    risk_calc_profit: '#3fb950',
     spectrogram_colorscale: 'Viridis',
-    spectrogram_cutoff_line: '#ff5050',
     variance_slope_up: '#2ca02c',
     variance_slope_down: '#d62728',
     variance_var: '#9467bd',
+    variance_slopevar: '#e8a33d',
     volume_up: '#3fb950',
     volume_down: '#f85149',
+  },
+
+  // Per-tool GLOBAL display defaults (project request 2026-10-04 — same
+  // app_settings-backed pattern as colorProfile above, see sma/core/db.py:
+  // DEFAULT_TOOL_DISPLAY). Purely visual toggles that make sense as ONE
+  // standing preference across every ticker — each tool's PER-TICKER state
+  // (trend_ruler's window/bands, simplex_ensemble's model params, ...)
+  // stays in analysis_settings, untouched by this. Hardcoded here as a
+  // synchronous default (same reasoning as colorProfile) until
+  // settings.js:loadAppSettings' GET /settings resolves and overwrites it.
+  toolDisplayDefaults: {
+    trend_ruler: {
+      showBands: true, showBandBorders: true, bandOpacity: 0.18,
+      extendBands: false, extendBorders: true, nFuture: 50,
+    },
+    simplex_ensemble: {
+      showMean: true, bandPct: 75,
+    },
+    regime_mixture_potential: {
+      showBounds: false, coveragePct: 95,
+    },
+    volume_osc: {
+      mode: 'plain',
+    },
+    variance_osc: {
+      oscMode: 'slope',
+    },
+    spectrogram: {
+      logY: false, contrastPct: 5,
+    },
+    risk_calc: {
+      deposit: 300000, riskPct: 2, borrowPct: 13,
+    },
   },
 
   // Основной график tab — price levels (S.activeMainTool === 'price_level',
@@ -89,9 +122,9 @@ export const S = {
 
   // Анализ tab — spectrogram analyzer (first of what's meant to be a small
   // family; see sma/core/analysis/)
-  spectrogramData:     null, // raw POST /series/spectrogram response (times/freqs/sxx_db/cutoffs)
+  spectrogramData:     null, // raw POST /series/spectrogram response (times/freqs/sxx_db)
   spectrogramSettings: {
-    depthBars: 500, nperseg: 64, overlapPct: 75, fmin: 0, fmax: 0.5,
+    depthBars: 500, nperseg: 16, overlapPct: 95, fmin: 0, fmax: 0.5,
     logY: false, contrastPct: 5, // contrastPct=5 -> color range = [5th, 95th] percentile, matches the prototype default
   },
 
@@ -100,7 +133,7 @@ export const S = {
   // module name predates the split and stays as-is, it's still the same
   // math). Split from a single combined "trend_variance" analyzer into TWO
   // tools (project feedback 2026-08-18, round 5): this one is main-chart
-  // only (trend line/bands/accel fan/origin); the FULL-history slope/var
+  // only (trend line/bands/origin); the FULL-history slope/var
   // rolling pass moved to its own oscillator-only tool, see
   // variance_oscillator.js. showOnChart gates the main-chart overlay —
   // independent of which tab is active (same "explicit toggle, persists
@@ -126,13 +159,13 @@ export const S = {
   // inspection, had the widest/narrowest alpha backwards from its own
   // comment; matches the same "same opacity, widest drawn first" stacking
   // trick already used for band_lambda's zones (chart.js:buildBandZoneShapes).
-  trendRulerData:     null, // client-side computed {trend,bands,extension,accel_fan} — see trend_ruler.js:computeLivePreview
+  trendRulerData:     null, // client-side computed {trend,bands,extension} — see trend_ruler.js:computeLivePreview
   trendRulerOriginTs: null, // this analyzer's OWN origin — null = "live" (always last bar); set by clicking a candle while its toolbar tool is active
   trendRulerSettings: {
     window: 200, bands: [2.0],
     showBands: true, showBandBorders: true, bandOpacity: 0.18,
     extendBands: false, extendBorders: true, nFuture: 50,
-    showOnChart: false, showAccelFan: false, mAccel: 50, nAccel: 50,
+    showOnChart: false,
   },
 
   // Осциллятор tab — variance_oscillator analyzer: the OTHER half of the
@@ -143,8 +176,24 @@ export const S = {
   // keeping the two permanently linked, since you may deliberately want a
   // different window for the oscillator's whole-history view than for the
   // ruler's local trend window.
+  // oscMode: 'slope' (направление тренда) | 'var' (дисперсия внутри окна
+  // тренда, resid_var) | 'slope_var' (дисперсия НАПРАВЛЕНИЯ тренда — rolling
+  // var() of the slope series itself, computed CLIENT-SIDE from the same
+  // fetch's slope[] array over slopeVarWindow trailing points — see
+  // variance_oscillator.js:rollingVarianceOfSlope. Ported from prototype
+  // app21-slope-variance-forecast.py:compute_slope_var (W1=window here,
+  // N=slopeVarWindow — same two-window split, just without that prototype's
+  // forecasting half, pure indicator per project request 2026-10-04).
   varianceOscData:     null, // raw {times, slope, var} from POST /series/trend-variance's oscillator field
-  varianceOscSettings: { window: 200, oscMode: 'slope' },
+  varianceOscSettings: { window: 200, oscMode: 'slope', slopeVarWindow: 20 },
+
+  // Осциллятор tab — volume_oscillator: mode 'plain' (default, close>=open
+  // bar coloring) | 'buysell' (CLV-proxy net buy/sell delta per bar, see
+  // volume_oscillator.js — heuristic ported from sma-research эксп.120,
+  // project_anomaly_analyzer_buysell_profile memory). No data field (unlike
+  // every other oscillator here) — volume is already on every candle, this
+  // mode is a pure per-render client computation, nothing to cache.
+  volumeOscSettings: { mode: 'plain' },
 
   // Основной график tab — moving_averages analyzer (sma/ui/moving_averages.js).
   // N independently configured lines (own type SMA/EMA/WMA + period each),
@@ -194,9 +243,10 @@ export const S = {
   zigzagPinnedTs:        new Set(),
   zigzagPinnedData:      {},
   // levels/opacity — zone rects (50/75/90% central intervals). tradeLevelPct
-  // — one-sided "уровень доверия" line drawn on step1, valued from step2's
-  // pool (see chart.js:tradeLevelPrice). showZones/showTradeLevel/trimZone1
-  // — independent visibility toggles (§6 of the band_lambda settings panel).
+  // — one-sided "граница шага 2" line (UI label, formerly "уровень доверия")
+  // drawn on step1, valued from step2's pool (see chart.js:tradeLevelPrice).
+  // showZones/showTradeLevel/trimZone1 — independent visibility toggles
+  // (§6 of the band_lambda settings panel).
   displayPreset: {
     levels: [50, 75, 90], opacity: 0.22,
     tradeLevelPct: 70, showZones: true, showTradeLevel: true, trimZone1: false,
@@ -215,8 +265,8 @@ export const S = {
     pca_p_range: [3, 150], pca_thr_range: [0.80, 0.85],
     use_lp_corr: true,
   },
-  simplexBandPct:  50,    // "Ширина полосы P" slider — band = [50-P/2, 50+P/2] percentiles, recomputed client-side
-  simplexShowMean: true,  // "Показывать среднее + полосу" checkbox
+  simplexBandPct:  75,    // "Ширина полосы P" slider — band = [50-P/2, 50+P/2] percentiles, recomputed client-side — GLOBAL, see toolDisplayDefaults.simplex_ensemble (this is just the synchronous pre-load mirror, same reasoning as colorProfile)
+  simplexShowMean: true,  // "Показывать среднее + полосу" checkbox — GLOBAL, ditto
 
   // range_forecast — прогноз ДИАПАЗОНА (min(low)..max(high)) на h=1..H шагов
   // вперёд, sma/ui/range_forecast.js / sma/core/forecast/range_forecast.py.
@@ -250,6 +300,32 @@ export const S = {
   },
   riskCorridorShowOnChart: false, // "закреплено" — видно даже когда этот инструмент не активен (см. moving_averages.js/local_prefs.js:getToolShowOnChart)
   riskCorridorResult: null,       // последний POST /risk-corridor/live ответ целиком (steps, n_neighbors, origin_date, close_at_origin, coverage_pct) или null
+
+  // risk_calc — «Калькулятор риска» (sma/ui/risk_calculator.js), проект
+  // 2026-10-04: размер позиции от % депозита + соотношение риск:прибыль +
+  // стоимость заёма по шорту (13%/год — брокер берёт плату за заём акций).
+  // ЧИСТО клиентский расчёт (как volume_oscillator/variance_oscillator's
+  // slope_var) — никакого backend-эндпоинта для самой математики, только
+  // персистентность (analysis_settings, analyzer_type='risk_calc') и лот+шаг
+  // цены (GET /instruments/{id}/trading-params, кэшируется на instruments.
+  // lot_size/price_step после первого MOEX-запроса). anchor='stop' — stop
+  // задаётся напрямую, tp = entry ± stopDistance·rr (с поправкой на
+  // стоимость заёма для short, чтобы ФАКТИЧЕСКИЙ R:R, а не только ценовое
+  // расстояние, совпадал с целевым — см. risk_calculator.js:
+  // resolveStopAndTp); anchor='profit' — наоборот, rr как "замочек" между
+  // ними (сделку можно собирать и от стопа, и от профита). Для short нет
+  // "наивного" варианта — только расчёт с учётом стоимости заёма.
+  riskCalcSettings: {
+    direction: 'short', anchor: 'stop',
+    deposit: 300000, riskPct: 2,
+    entry: null, stop: null, tp: null, rr: 3,
+    borrowPct: 13, holdDays: 30,
+  },
+  riskCalcLotSize: 1,          // с MOEX, см. risk_calculator.js:loadRiskCalcTradingParams
+  riskCalcPriceStep: 0.01,     // MINSTEP с MOEX, та же загрузка — округление entry/stop/tp
+  riskCalcPickTarget: null,    // 'entry'|'stop'|'tp' while "Установить на графике" is armed for that field, иначе null
+  riskCalcPickHoverPrice: null, // continuous cursor-following preview while picking, never persisted (тот же паттерн, что priceLevelHoverPrice)
+  riskCalcShowOnChart: false,  // "закреплено на графике" — видно даже когда этот инструмент не активен (см. moving_averages.js/local_prefs.js:getToolShowOnChart)
 
   // regime_mixture_potential — regime-conditioned pairlag lagged-ensemble +
   // GaussianMixture-сценарии потенциала, с премоткой по origin.

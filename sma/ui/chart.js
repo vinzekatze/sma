@@ -114,6 +114,13 @@ const baseLayout = {
   plot_bgcolor:  CHART_BG,
   font:          { color: '#c9d1d9', size: 11 },
   margin:        { t: 16, r: 60, b: 36, l: 10 },
+  // Plotly defaults multi-trace bars to 'group' (same x slot split into
+  // narrower side-by-side bars) — 'overlay' instead draws each bar trace
+  // full-width at its own x, which is what volume_oscillator.js's buysell
+  // mode wants (a positive buy bar and a negative sell bar stacked on the
+  // SAME x, not squeezed side-by-side). Every other panel here only ever
+  // has one bar trace at a time, so this is a no-op for them.
+  barmode:       'overlay',
   showlegend:    true,
   legend: {
     bgcolor: 'rgba(0,0,0,0.4)', bordercolor: '#30363d', borderwidth: 1,
@@ -133,8 +140,10 @@ function buildDivider() {
   }];
 }
 
-// Shapes for the active subpanel analyzer (e.g. spectrogram's filter-bank
-// cutoff lines) — generic dispatch through the registry, see tools.js.
+// Shapes for the active subpanel analyzer — generic dispatch through the
+// registry, see tools.js (none currently implement this hook; kept as a
+// registry-level capability, same as buildSubpanelTraces, for whichever
+// future analyzer needs reference lines/shapes on the shared subpanel).
 function buildSubpanelShapes() {
   if (S.subpanel === 'none') return [];
   return TOOLS.find(a => a.type === S.subpanel)?.buildSubpanelShapes?.() ?? [];
@@ -454,16 +463,30 @@ export function applyShapes() {
 // top of the toAxisYRange bug above. 'yaxis.autorange:true' (rather than
 // hand-converting the previous range to the new space) is the
 // Plotly-documented safe way to switch a log/linear axis type.
+// Keeps the VISIBLE price window across the switch: the current y range is
+// converted into the new scale instead of autorange. Autorange re-fits to
+// every trace — the potential heatmap's grid reaches toward zero, so going
+// back to linear used to squash the price chart (drift on toggle).
 export function setMainLogScale(enabled) {
+  const fl = document.getElementById('chart')?._fullLayout;
+  const curRange = fl?.yaxis?.range;
+  const wasLog = fl?.yaxis?.type === 'log';
   S.mainLogScale = enabled;
   if (_rafHandle) {
     cancelAnimationFrame(_rafHandle);
     _rafHandle = null;
     _pendingPlotArgs = null;
   }
+  // Plotly reports the range in the axis' current units; go through linear
+  // prices so the conversion is the same one renderChart uses (toAxisYRange).
+  let yRange = null;
+  if (curRange) {
+    const linear = wasLog ? curRange.map(v => 10 ** v) : curRange;
+    yRange = toAxisYRange(linear);
+  }
   Plotly.relayout('chart', {
     'yaxis.type': enabled ? 'log' : 'linear',
-    'yaxis.autorange': true,
+    ...(yRange ? { 'yaxis.range': yRange } : { 'yaxis.autorange': true }),
   });
 }
 
@@ -472,11 +495,28 @@ export function setMainLogScale(enabled) {
 // объекты" is decluttering — see buildVisibleOverlays) are currently
 // showing — recomputes their shapes fresh so the new origin line doesn't
 // clobber them.
+// Clears the MAIN origin (S.originTs, the "next forecast starts here" line).
+// Used by the Курсор reset button for tools that have no origin of their own.
+// Every origin change goes through notifyMainOriginChanged so the ACTIVE
+// tool can recompute whatever depends on it (live results, button labels).
+function notifyMainOriginChanged() {
+  const active = TOOLS.find(a => a.type === S.activeMainTool);
+  active?.onMainOriginChanged?.();
+}
+
+export function clearMainOrigin() {
+  const had = !!S.originTs;
+  S.originTs = null;
+  if (had) renderChart({ preserveRange: true });
+  notifyMainOriginChanged(); // also when it was already empty — the tool may still need its live recalc
+}
+
 export function setOrigin(ts) {
   S.originTs = ts;
   const { shapes } = buildVisibleOverlays();
   S.shapes = [...shapes, originLineShape(ts)];
   applyShapes();
+  notifyMainOriginChanged();
 }
 
 // ── zigzag overlay (band_lambda) ────────────────────────────────────────────
@@ -636,15 +676,19 @@ function levelBounds(step, originLogPrice, levelPct) {
   return { lo: Math.exp(originLogPrice + lrLo), hi: Math.exp(originLogPrice + lrHi) };
 }
 
-// "Уровень доверия" — a single one-sided price threshold drawn on step1,
-// but its VALUE is read from step2's pool (the "уход+возврат" distribution),
-// not step1's own — the undershoot/overshoot tail of the round-trip return
-// (recovery fell short of the origin for a decline setup, or overshot it
-// for a rise setup). Uses the SAME symmetric-interval quantile as
-// levelBounds (q=(1-frac)/2 / (1+frac)/2) — not an independent one-sided
-// convention — so setting this to e.g. 90 lines up EXACTLY with the 90%
-// zone's own edge when that zone is also shown, instead of silently
-// meaning a different threshold under the same "%" label.
+// "Граница шага 2" (UI label, project rename 2026-10-04 — formerly "уровень
+// доверия", a less accurate name for what this actually is) — a single
+// one-sided price threshold drawn on step1, but its VALUE is read from
+// step2's pool (the "уход+возврат" distribution), not step1's own — the
+// undershoot/overshoot tail of the round-trip return (recovery fell short
+// of the origin for a decline setup, or overshot it for a rise setup).
+// Uses the SAME symmetric-interval quantile as levelBounds (q=(1-frac)/2 /
+// (1+frac)/2) — not an independent one-sided convention — so setting this
+// to e.g. 90 lines up EXACTLY with the 90% zone's own edge when that zone
+// is also shown, instead of silently meaning a different threshold under
+// the same "%" label. Internal identifiers (tradeLevelPct/showTradeLevel/
+// tradePrice, display_presets.trade_level_pct column) keep their original
+// names — only the user-facing label changed, not the schema/API.
 function tradeLevelPrice(step2, originLogPrice, tradeLevelPct, isDownStep1) {
   if (!step2?.ok || !step2.pool_values?.length) return null;
   const frac = tradeLevelPct / 100;
@@ -694,10 +738,10 @@ export function buildBandZoneShapes(forecastResult, geometry, displayPreset) {
 
       activeLevels.forEach(levelPct => {
         let { lo, hi } = levelBounds(step, originLogPrice, levelPct);
-        // "Обрезать зону1 по уровню доверия" — keep only the side of the
-        // band beyond the trade-level line, in the direction of the extreme
-        // (below it for a decline/buy setup, above it for a rise/short
-        // setup) — the sub-region actually implied by the trade-level line,
+        // "Обрезать зону 1 по границе шага 2" — keep only the side of the
+        // band beyond the step-2-boundary line, in the direction of the
+        // extreme (below it for a decline/buy setup, above it for a
+        // rise/short setup) — the sub-region actually implied by that line,
         // not the full unconditional quantile band.
         if (h === 1 && trimZone1 && tradePrice != null) {
           if (isDown) {
@@ -723,7 +767,10 @@ export function buildBandZoneShapes(forecastResult, geometry, displayPreset) {
     shapes.push({
       type: 'line', xref: 'x', yref: 'y',
       x0: geo.step1.x0, x1: geo.step1.x1, y0: tradePrice, y1: tradePrice,
-      line: { color: `rgb(${tradeColor})`, width: 2 },
+      // Wide dash (not solid) — project request 2026-10-04: risk_calculator.js's
+      // entry/stop/tp overlay lines are now solid, so this one needs to read
+      // as visually distinct at a glance rather than conflict with them.
+      line: { color: `rgb(${tradeColor})`, width: 2, dash: 'longdash' },
       layer: 'above',
     });
   }
@@ -1017,7 +1064,7 @@ function buildForecastMarkerTraces() {
 // whatever's selected wins over them; only with nothing selected does it
 // fall back to every forecast already fetched for the active model
 // (S.renderedForecasts), regardless of pin state.
-function buildVisibleOverlays() {
+function visibleForecastIds() {
   let visibleIds;
   if (S.objectsHidden) {
     visibleIds = new Set();
@@ -1040,7 +1087,11 @@ function buildVisibleOverlays() {
     visibleIds = new Set(S.pinnedForecastIds);
     if (S.selectedForecastId != null) visibleIds.add(S.selectedForecastId);
   }
+  return visibleIds;
+}
 
+function buildVisibleOverlays() {
+  const visibleIds = visibleForecastIds();
   const shapes = [], annotations = [], traces = [];
   for (const id of visibleIds) {
     const f = S.renderedForecasts.get(id);
@@ -1078,22 +1129,75 @@ function dayLabelsFor(candles) {
   return labels;
 }
 
+// ── display window (ограничение «свечей на графике») ──────────────────
+// Limits DRAWING only. S.candles keeps every loaded bar — forecasts, MA,
+// risk calculator and the origin lookup all read it. Traces are built from
+// the visible window plus DISPLAY_MARGIN_SPANS of view-span on each side, so
+// a small pan doesn't reveal an empty edge before the next settle re-slices
+// (candle_window.js calls displayNeedsRefresh on settle).
+const DISPLAY_MARGIN_SPANS = 1.0;
+let _displayBounds = null; // { lo, hi } in ms — the window the current traces were built from
+
+function _msOf(s) { return new Date(s).getTime(); }
+
+function _computeDisplayBounds(xRange) {
+  if (!xRange) return null;
+  const a = _msOf(xRange[0]), b = _msOf(xRange[1]);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return null;
+  const span = b - a;
+  return { lo: a - span * DISPLAY_MARGIN_SPANS, hi: b + span * DISPLAY_MARGIN_SPANS };
+}
+
+// [i0, i1) of an ascending `times` array (ISO begin strings) inside the
+// display window. No window yet → everything.
+export function displayIndexRange(times) {
+  if (!_displayBounds) return [0, times.length];
+  const { lo, hi } = _displayBounds;
+  const i0 = times.findIndex(t => _msOf(t) >= lo);
+  if (i0 < 0) return [times.length, times.length];
+  let i1 = times.length;
+  while (i1 > i0 && _msOf(times[i1 - 1]) > hi) i1--;
+  return [i0, i1];
+}
+
+// Visible-window slice of S.candles (drawing only — never assign the result
+// back to S.candles).
+export function displayCandles() {
+  const [i0, i1] = displayIndexRange(S.candles.map(c => c.begin));
+  return S.candles.slice(i0, i1);
+}
+
+// True when the view has moved close to an edge of what was drawn, or has
+// zoomed in far enough that the drawn window is much wider than needed.
+// Checked on relayout settle (candle_window.js), not during a drag.
+export function displayNeedsRefresh() {
+  if (!_displayBounds) return false;
+  const { x } = getCurrentRanges();
+  if (!x) return false;
+  const a = _msOf(x[0]), b = _msOf(x[1]);
+  const span = b - a;
+  if (!(span > 0)) return false;
+  const { lo, hi } = _displayBounds;
+  return a < lo + span * 0.25 || b > hi - span * 0.25 || (hi - lo) > span * 4;
+}
+
 function buildBaseTraces() {
-  const c = S.candles;
+  const [i0, i1] = displayIndexRange(S.candles.map(r => r.begin));
+  const c = S.candles.slice(i0, i1);
 
   const candlestick = {
-    type: 'candlestick', name: S.ticker,
+    type: 'candlestick', name: `${S.ticker} ${S.interval}`,
     x: c.map(r => r.begin), open: c.map(r => r.open),
     high: c.map(r => r.high), low: c.map(r => r.low), close: c.map(r => r.close),
     increasing: { line: { color: S.colorProfile.candle_up }, fillcolor: S.colorProfile.candle_up },
     decreasing: { line: { color: S.colorProfile.candle_down }, fillcolor: S.colorProfile.candle_down },
-    whiskerwidth: 0, showlegend: true, // legend's own first entry names which ticker is loaded — otherwise nothing on the chart says so
+    whiskerwidth: 0, showlegend: true, // legend's own first entry names which ticker+interval is loaded (project feedback 2026-10-04: interval alone wasn't shown anywhere) — otherwise nothing on the chart says so
   };
 
   const dayTrace = {
     type: 'scatter', x: c.map(r => r.begin), y: c.map(r => r.close),
     mode: 'none', name: '',
-    text: dayLabelsFor(c),
+    text: dayLabelsFor(S.candles).slice(i0, i1), // labels cached per full S.candles, sliced for drawing
     hovertemplate: '%{text}<extra></extra>',
     showlegend: false,
   };
@@ -1127,15 +1231,49 @@ let _pendingPlotArgs = null;
 // from the price-level feature entirely (see cursor_tools.js:
 // renderPriceLevelOverlay — a plain HTML/CSS overlay instead), which makes
 // the workaround moot rather than actually fixing the original mechanism.
+// Zoom/pan gesture freeze. A repaint built from a range captured before the
+// latest wheel/drag step, and painted a frame later, snaps the view back for
+// a moment ("телепортируется"). So while a gesture is running we don't paint
+// at all — the latest args stay queued, and once the view has been quiet for
+// GESTURE_QUIET_MS we paint them with the CURRENT x/y ranges.
+const GESTURE_QUIET_MS = 150;
+let _lastRelayoutAt = 0;
+let _gestureTimer = null;
+
+function _gestureActive() {
+  return performance.now() - _lastRelayoutAt < GESTURE_QUIET_MS;
+}
+
+function _paintPending() {
+  const [t, l, c] = _pendingPlotArgs;
+  _pendingPlotArgs = null;
+  Plotly.react('chart', t, l, c);
+  _bindClickIfNeeded();
+  refreshOverlays();
+}
+
+function _schedulePaintAfterGesture() {
+  if (_gestureTimer) return;
+  _gestureTimer = setTimeout(() => {
+    _gestureTimer = null;
+    if (!_pendingPlotArgs) return;
+    if (_gestureActive()) { _schedulePaintAfterGesture(); return; }
+    // Take the view as it is NOW, not as it was when this render was built.
+    const fl = document.getElementById('chart')?._fullLayout;
+    const l = _pendingPlotArgs[1];
+    if (fl && l.xaxis?.range && fl.xaxis?.range) l.xaxis = { ...l.xaxis, range: fl.xaxis.range };
+    if (fl && l.yaxis?.range && fl.yaxis?.range) l.yaxis = { ...l.yaxis, range: fl.yaxis.range };
+    _paintPending();
+  }, GESTURE_QUIET_MS);
+}
+
 function schedulePlotlyReact(traces, layout, config) {
   _pendingPlotArgs = [traces, layout, config];
   if (_rafHandle) return;
   _rafHandle = requestAnimationFrame(() => {
     _rafHandle = null;
-    const [t, l, c] = _pendingPlotArgs;
-    Plotly.react('chart', t, l, c);
-    _bindClickIfNeeded();
-    refreshOverlays();
+    if (_gestureActive()) { _schedulePaintAfterGesture(); return; }
+    _paintPending();
   });
 }
 
@@ -1171,6 +1309,11 @@ export function renderChart({ preserveRange = false } = {}) {
   if (S.originTs) shapes.push(originLineShape(S.originTs));
   S.shapes = shapes;
   S.bandAnnotations = annotations;
+
+  // Display window first — every trace builder below reads it.
+  const ranges0 = getCurrentRanges();
+  const xRange0 = preserveRange ? ranges0.x : defaultXRange(c);
+  _displayBounds = _computeDisplayBounds(xRange0);
 
   const baseTraces = buildBaseTraces();
   // Forecast zigzag: the actively selected T while band_lambda is the
@@ -1347,6 +1490,16 @@ function potentialGlobalRange(result) {
         hi = Math.max(hi, m + 4 * s);
       }
     }
+  }
+  // mean-4σ on a wide-uncertainty snapshot (long horizon, thin pool) can go
+  // non-positive — invisible in linear scale (just off-screen below the
+  // candle-only y-range), but a heatmap row at y<=0 breaks Plotly's log10
+  // transform and blanks the WHOLE trace from that row down (project
+  // report 2026-10-04: regime_mixture_potential heatmap missing its bottom
+  // half specifically in log scale, e.g. LKOH). Same floor convention as
+  // toAxisYRange's safeLo above.
+  if (Number.isFinite(lo) && Number.isFinite(hi) && hi > 0) {
+    lo = Math.max(lo, hi * 1e-6);
   }
   const range = Number.isFinite(lo) && Number.isFinite(hi) && hi > lo ? { lo, hi } : null;
   _potentialRangeCache = { result, range };
@@ -1616,6 +1769,16 @@ function _priceAtY(gd, clientY) {
   return yaxis.p2d(py);
 }
 
+// Public wrapper around _priceAtY — lets a tool OUTSIDE this module (e.g.
+// risk_calculator.js's "установить на графике" click-to-pick-price button)
+// bind its own native click listener and read the same correctly log-scale-
+// aware price the price_level tool's native listeners already use, without
+// duplicating _priceAtY's pixel math (see its own docstring above for why
+// that math is easy to get subtly wrong).
+export function priceAtClientY(gd, clientY) {
+  return _priceAtY(gd, clientY);
+}
+
 function _priceAtClick(gd, data) {
   return data.event ? _priceAtY(gd, data.event.clientY) : null;
 }
@@ -1717,11 +1880,13 @@ function _bindClickIfNeeded() {
   // in real time — refreshOverlays() is a pure DOM read+write (no
   // Plotly.relayout call), so calling it here doesn't reintroduce that
   // same conflict.
-  gd.on('plotly_relayouting', () => { _interacting = true; refreshOverlays(); });
+  gd.on('plotly_relayouting', () => { _interacting = true; _lastRelayoutAt = performance.now(); refreshOverlays(); });
   gd.on('plotly_relayout', () => {
     _interacting = false;
+    _lastRelayoutAt = performance.now();
     refreshOverlays();
     for (const fn of _relayoutHooks) fn();
   });
   _chartClickBound = true;
 }
+

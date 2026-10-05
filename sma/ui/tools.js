@@ -117,7 +117,7 @@ import { saveActiveMainTool, saveActiveOscillatorTool } from './local_prefs.js';
 //   buildSubpanelTraces(): -> Plotly traces for the shared yaxis2 slot,
 //                             called only when S.subpanel === this type
 //   buildSubpanelShapes(): -> Plotly shapes for the shared yaxis2 slot
-//                             (e.g. spectrogram's filter-bank cutoff lines)
+//                             (reference lines etc.; none currently use it)
 //   subpanelYAxisPolicy(): -> { key, fixedrange, range } describing how the
 //                             shared yaxis2 should center/zoom while THIS
 //                             tool owns it (chart.js:activeY2Policy) — `key`
@@ -138,6 +138,11 @@ import { saveActiveMainTool, saveActiveOscillatorTool } from './local_prefs.js';
 //   resetOrigin():         called by the toolbar's shared "reset origin"
 //                             action button when this tool is active —
 //                             absent if the tool has no "live" origin
+//   onMainOriginChanged(): called when the MAIN origin (S.originTs) is set
+//                             or cleared while this tool is active — the
+//                             place to recompute live results / labels
+//                             that depend on it (chart.js:setOrigin,
+//                             clearMainOrigin)
 //                             concept (the button hides itself, see
 //                             renderToolbar; forecast models don't set this
 //                             — there's no "live" default to reset to).
@@ -357,19 +362,9 @@ export function renderToolbar() {
   // play that role explicitly, see selectTool), so their own
   // tool-panel-free/tool-panel-none always cover that spot via the loop
   // above instead of a separate hint element.
-  const activeMain = getTool(S.activeMainTool);
-  const resetBtn = document.getElementById('tool-reset-origin-btn');
-  if (resetBtn) resetBtn.style.display = activeMain?.resetOrigin ? '' : 'none';
+  // (the Курсор toolbar's reset button is always enabled — see app.js:resetActiveToolOrigin)
 }
 
-// Bound to the Основной график toolbar's single shared "reset origin"
-// button — acts on whichever MAIN-surface tool is currently active
-// (analyzer OR forecaster — though no forecaster registers resetOrigin, see
-// module docstring), so N tools with an origin concept don't each need
-// their own duplicated reset button in their own panel.
-export function resetActiveToolOrigin() {
-  getTool(S.activeMainTool)?.resetOrigin?.();
-}
 
 // ── "показать/скрыть активные объекты" declutter toggle (S.objectsHidden,
 // cursor_tools.js:toggleObjectsHidden) — shared visibility rule every

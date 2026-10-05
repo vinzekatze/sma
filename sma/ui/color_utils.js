@@ -3,7 +3,7 @@
 // Plotly actually wants: an "r,g,b" triplet (for building an rgba(...) fill
 // with a caller-chosen alpha) or a ready-made rgba(...) string. Several
 // tools need a SEMI-transparent version of a configurable color (band zones,
-// accel-fan fills, simplex origin lines) — the alpha itself stays a fixed
+// simplex origin lines) — the alpha itself stays a fixed
 // per-feature constant (not user-configurable, keeps the color picker to
 // one control per role instead of a color+alpha pair everywhere), only the
 // hue comes from the profile.

@@ -115,6 +115,13 @@
     <circle class="icon-fill" cx="14" cy="12.5" r="2.3" opacity="0.6"/>
     <circle class="icon-fill" cx="15.5" cy="4.5" r="1.4" opacity="0.4"/>
   </symbol>
+  <symbol id="icon-scale" viewBox="0 0 20 20">
+    <line x1="10" y1="2" x2="10" y2="16"/>
+    <line x1="3" y1="5" x2="17" y2="5"/>
+    <path d="M3 5 L1.3 10.5 Q3 12.3 4.7 10.5 Z"/>
+    <path d="M17 5 L15.3 10.5 Q17 12.3 18.7 10.5 Z"/>
+    <line x1="6" y1="16.5" x2="14" y2="16.5"/>
+  </symbol>
 </svg>
 
 <div id="app">
@@ -170,7 +177,7 @@
                 <input id="ticker-search-input" type="text" placeholder="Тикер или название (можно пусто)" style="flex:1;width:auto" autocomplete="off">
               </div>
               <div class="field-row">
-                <select id="ticker-search-category" style="flex:1;width:auto">
+                <select id="ticker-search-category">
                   <option value="">Все</option>
                   <option value="tqbr">Акции (TQBR)</option>
                   <option value="bond">Облигации</option>
@@ -293,6 +300,7 @@
     <div id="chart-wrap">
       <div id="chart"></div>
       <div id="price-level-overlay"></div>
+      <div id="risk-calc-overlay"></div>
       <div id="chart-loading-overlay" class="hidden"><div class="spinner-ring"></div></div>
     </div>
 
@@ -324,11 +332,17 @@
 
 Ценовой уровень — клик ставит/двигает горизонтальную линию по цене клика, пока не нажата «Зафиксировать»; после фиксации следующий клик начинает новый уровень. Список уровней — ниже, с удалением по одному или «Очистить всё».
 
-Выбор объектов — клик по маркеру прогноза на графике показывает его результат и позволяет закрепить отображение, БЕЗ переключения на инструмент этой модели — отдельный, самостоятельный режим просмотра.">?</span>
+Выбор объектов — клик по маркеру прогноза на графике показывает его результат и позволяет закрепить отображение, БЕЗ переключения на инструмент этой модели — отдельный, самостоятельный режим просмотра.
+
+⟲ — сбросить точку отсчёта активного инструмента: у трендовой линейки — её собственную (на «живой» режим, последний бар), у остальных инструментов — основную точку отсчёта.">?</span>
           </h4>
           <div class="tool-toolbar">
             <span id="cursor-tool-buttons"></span>
             <span class="tool-spacer"></span>
+            <button class="tool-btn" id="tool-reset-origin-btn" title="Сбросит точку отсчёта"
+              onclick="resetActiveToolOrigin()">
+              <svg class="icon"><use href="#icon-undo"/></svg>
+            </button>
             <button class="tool-btn" id="log-scale-btn" title="Логарифмический масштаб основного графика"
               onclick="toggleMainLogScale()">
               <svg class="icon"><use href="#icon-log-scale"/></svg>
@@ -348,15 +362,11 @@
 
 «Показывать на графике» — независимая галочка внутри панели, НЕ связана с тем, какая иконка сейчас активна: можно держать включённым сразу несколько анализаторов одновременно.
 
-⟲ в тулбаре — сбросить точку отсчёта активного инструмента на «живой» режим (последний бар); появляется только когда у активного инструмента есть точка отсчёта.">?</span>
+">?</span>
           </h4>
           <div class="tool-toolbar">
             <span id="main-tool-buttons"></span>
             <span class="tool-spacer"></span>
-            <button class="tool-btn" id="tool-reset-origin-btn" title="Сбросить точку отсчёта активного инструмента"
-              onclick="resetActiveToolOrigin()" style="display:none">
-              <svg class="icon"><use href="#icon-undo"/></svg>
-            </button>
           </div>
         </section>
 
@@ -449,20 +459,6 @@
                 oninput="onTrendRulerSettingsChange()"
                 title="Общее число шагов для обоих видов экстраполяции">
             </div>
-            <div class="field-row checkbox-row">
-              <label><input id="tr-show-accel-fan" type="checkbox" onchange="onTrendRulerSettingsChange()"> Веер ускорения (вспомогательно)</label>
-            </div>
-            <div class="field-row">
-              <label>m (точек усреднения)</label>
-              <input id="tr-m-accel" type="number" value="50" min="3" max="200" step="1"
-                oninput="onTrendRulerSettingsChange()">
-            </div>
-            <div class="field-row">
-              <label>n (шагов ускорения)</label>
-              <input id="tr-n-accel" type="number" value="50" min="1" max="200" step="1"
-                oninput="onTrendRulerSettingsChange()">
-            </div>
-
             <div class="field-row">
               <span id="tr-meta" class="muted-val">—</span>
             </div>
@@ -608,8 +604,8 @@
                     </div>
 
                     <div class="field-row" style="margin-top:10px">
-                      <label>Уровень доверия (%)
-                        <span class="info-badge" data-tip="Линия на шаге 1: цена, до которой с заданной вероятностью дойдёт движение — значение берётся из распределения шага 2, рисуется на шаге 1. Только визуальная подсказка — не привязана к инструменту «Ценовой уровень».">?</span>
+                      <label>Граница шага 2 (%)
+                        <span class="info-badge" data-tip="Линия на шаге 1: край доверительного интервала шага 2 (уход+возврат) на заданном уровне — значение берётся из распределения шага 2, рисуется на шаге 1 для наглядности. Только визуальная подсказка — не привязана к инструменту «Ценовой уровень».">?</span>
                       </label>
                       <input id="bl-trade-level-pct" type="number" min="1" max="99" step="1" value="70"
                         style="width:60px" onchange="applyDisplaySettings()">
@@ -618,10 +614,10 @@
                       <label><input id="bl-show-zones" type="checkbox" checked onchange="applyDisplaySettings()"> Показывать зоны вероятности</label>
                     </div>
                     <div class="field-row checkbox-row">
-                      <label><input id="bl-show-trade-level" type="checkbox" checked onchange="applyDisplaySettings()"> Показывать уровень доверия</label>
+                      <label><input id="bl-show-trade-level" type="checkbox" checked onchange="applyDisplaySettings()"> Показывать границу шага 2</label>
                     </div>
                     <div class="field-row checkbox-row">
-                      <label><input id="bl-trim-zone1" type="checkbox" onchange="applyDisplaySettings()"> Обрезать зону 1 по уровню доверия</label>
+                      <label><input id="bl-trim-zone1" type="checkbox" onchange="applyDisplaySettings()"> Обрезать зону 1 по границе шага 2</label>
                     </div>
                   </section>
                 </div>
@@ -763,9 +759,9 @@
                     </div>
                     <div class="field-row">
                       <label>Ширина полосы P</label>
-                      <span id="simplex-band-pct-label" class="muted-val">50%</span>
+                      <span id="simplex-band-pct-label" class="muted-val">75%</span>
                     </div>
-                    <input id="simplex-band-pct" type="range" min="0" max="100" step="1" value="50"
+                    <input id="simplex-band-pct" type="range" min="0" max="100" step="1" value="75"
                       style="width:100%" oninput="onSimplexBandPctChange(this.value)">
                     <small class="hint">P=50 → полоса p25–p75 по ансамблю; P=90 → p5–p95.</small>
                   </section>
@@ -1110,6 +1106,118 @@
 
           </div><!-- /tool-panel-risk_corridor -->
 
+          <div id="tool-panel-risk_calc" style="display:none">
+
+            <div class="tool-panel-header">
+              <span class="tool-panel-title">Калькулятор риска</span>
+              <button class="tool-show-toggle" id="rc-show-chart-btn" onclick="toggleRiskCalcShowChart()"
+                title="Закрепить на графике (иначе видно, только пока этот инструмент активен)">
+                <svg class="icon"><use href="#icon-eye"/></svg>
+              </button>
+            </div>
+
+            <section class="panel-section">
+              <small class="hint">Размер позиции от риска на депозит + соотношение риск:прибыль (R:R). Для
+                шорта — с поправкой на стоимость заёма (брокер берёт плату за заём акций): фактический R:R
+                пересчитывается под эту поправку, чтобы сделка реально соответствовала цели. Линии всегда от
+                последнего бара — не историческая точка отсчёта, как у прогнозов.</small>
+            </section>
+
+            <section class="panel-section">
+              <div class="field-row">
+                <label>Депозит</label>
+                <input id="rc-deposit" type="number" value="300000" min="0" step="1000" onchange="onRiskCalcSettingsChange()">
+              </div>
+              <div class="field-row">
+                <label>Риск на сделку, %</label>
+                <input id="rc-risk-pct" type="number" value="2" min="0.1" step="0.1" onchange="onRiskCalcSettingsChange()">
+              </div>
+              <div class="field-row">
+                <label>Направление</label>
+                <select id="rc-direction" onchange="onRiskCalcDirectionChange()">
+                  <option value="long">Long</option>
+                  <option value="short" selected>Short</option>
+                </select>
+              </div>
+            </section>
+
+            <section class="panel-section">
+              <div class="field-row">
+                <label>Якорь R:R</label>
+                <select id="rc-anchor" onchange="onRiskCalcAnchorChange()">
+                  <option value="stop" selected>По стопу</option>
+                  <option value="profit">По тейку</option>
+                </select>
+              </div>
+              <div class="field-row">
+                <label>Вход</label>
+                <div class="rc-input-actions">
+                  <input id="rc-entry" type="number" step="0.01" min="0" style="width:72px" onchange="onRiskCalcSettingsChange()">
+                  <button type="button" class="tool-show-toggle" title="Текущая цена" onclick="setRiskCalcEntryToCurrent()">
+                    <svg class="icon"><use href="#icon-target"/></svg>
+                  </button>
+                  <button type="button" class="tool-show-toggle" id="rc-pick-entry-btn" title="Установить на графике"
+                    onclick="toggleRiskCalcPickOnChart('entry')">
+                    <svg class="icon"><use href="#icon-price-level"/></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="field-row">
+                <label>Стоп</label>
+                <div class="rc-input-actions">
+                  <input id="rc-stop" type="number" step="0.01" min="0" style="width:84px" onchange="onRiskCalcSettingsChange()">
+                  <button type="button" class="tool-show-toggle" id="rc-pick-stop-btn" title="Установить на графике"
+                    onclick="toggleRiskCalcPickOnChart('stop')">
+                    <svg class="icon"><use href="#icon-price-level"/></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="field-row">
+                <label>Тейк-профит</label>
+                <div class="rc-input-actions">
+                  <input id="rc-tp" type="number" step="0.01" min="0" style="width:84px" onchange="onRiskCalcSettingsChange()">
+                  <button type="button" class="tool-show-toggle" id="rc-pick-tp-btn" title="Установить на графике"
+                    onclick="toggleRiskCalcPickOnChart('tp')">
+                    <svg class="icon"><use href="#icon-price-level"/></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="field-row">
+                <label>Risk : Reward (1 : X)</label>
+                <input id="rc-rr" type="number" value="3" min="0.1" step="0.1" onchange="onRiskCalcSettingsChange()">
+              </div>
+              <small class="hint">Поле «Стоп» или «Тейк» (неактивное — серым) всегда пересчитывается от
+                другого через R:R, как замочек, — выставляйте сделку с любой стороны, в том числе прямо на
+                графике (иконка со значком ценового уровня).</small>
+            </section>
+
+            <section class="panel-section">
+              <div class="field-row">
+                <label>Лот / шаг цены (MOEX)</label>
+                <span id="rc-lot-size" class="muted-val">—</span>
+              </div>
+            </section>
+
+            <section class="panel-section" id="rc-short-section">
+              <div class="field-row">
+                <label>Ставка брокера, %/год</label>
+                <input id="rc-borrow-pct" type="number" value="13" min="0" step="0.1" onchange="onRiskCalcSettingsChange()">
+              </div>
+              <div class="field-row">
+                <label>Срок удержания, дн.</label>
+                <input id="rc-hold-days" type="number" value="30" min="0" step="1" onchange="onRiskCalcSettingsChange()">
+              </div>
+              <small class="hint">Заём начисляется на весь номинал позиции за каждый день удержания, база —
+                365 дней в году.</small>
+            </section>
+
+            <section class="panel-section">
+              <div id="rc-error" class="hint" style="display:none;color:var(--red)"></div>
+              <div id="rc-results"></div>
+            </section>
+
+          </div><!-- /tool-panel-risk_calc -->
+
         </section>
 
       </div><!-- /tab-main -->
@@ -1148,16 +1256,35 @@
             </button>
 
             <div class="field-row" style="margin-top:6px">
-              <label>Осциллятор</label>
-              <select id="vo-osc-mode" style="flex:1;width:auto" onchange="setVarianceOscMode()">
-                <option value="slope" selected>Тренд (slope)</option>
-                <option value="var">Дисперсия (resid_var)</option>
+              <label>Режим</label>
+              <select id="vo-osc-mode" onchange="setVarianceOscMode()">
+                <option value="slope" selected>Направление тренда</option>
+                <option value="var">Дисперсия внутри окна тренда</option>
+                <option value="slope_var">Дисперсия направления тренда</option>
               </select>
+            </div>
+
+            <div id="vo-slopevar-window-wrap" style="display:none;margin-top:6px">
+              <div class="field-row">
+                <label>Окно дисперсии (баров)</label>
+                <input id="vo-slopevar-window" type="number" class="no-spin" value="20" min="2" max="500" step="1" style="width:80px"
+                  oninput="onVarianceOscSlopeVarWindowInput(this.value)">
+              </div>
+              <input id="vo-slopevar-window-range" type="range" min="2" max="500" step="1" value="20"
+                style="width:100%" oninput="onVarianceOscSlopeVarWindowInput(this.value)"
+                title="Окно расчёта дисперсии НАПРАВЛЕНИЯ тренда (N) — отдельное от окна тренда выше (W1): дисперсия считается по последним N значениям самого наклона">
             </div>
           </div>
 
           <div id="tool-panel-volume" style="display:none">
-            <p class="muted-val" style="margin:2px 0 6px">
+            <div class="field-row">
+              <label>Режим</label>
+              <select id="vol-osc-mode" onchange="setVolumeOscMode()">
+                <option value="plain" selected>Обычный</option>
+                <option value="buysell">Покупки/продажи (эвристика CLV)</option>
+              </select>
+            </div>
+            <p class="muted-val" style="margin:2px 0 6px" id="vol-osc-mode-hint">
               Цвет бара — как у свечи (close ≥ open — зелёный, иначе красный).
             </p>
           </div>
@@ -1170,12 +1297,12 @@
             </div>
             <div class="field-row">
               <label>Окно STFT</label>
-              <select id="spectrogram-nperseg" style="flex:1;width:auto" onchange="onSpectrogramSettingsChange()">
+              <select id="spectrogram-nperseg" onchange="onSpectrogramSettingsChange()">
                 <option value="4">4</option>
                 <option value="8">8</option>
-                <option value="16">16</option>
+                <option value="16" selected>16</option>
                 <option value="32">32</option>
-                <option value="64" selected>64</option>
+                <option value="64">64</option>
                 <option value="128">128</option>
                 <option value="256">256</option>
                 <option value="512">512</option>
@@ -1183,14 +1310,14 @@
             </div>
             <div class="field-row">
               <label>Перекрытие</label>
-              <span id="spectrogram-overlap-label" class="muted-val">75%</span>
+              <span id="spectrogram-overlap-label" class="muted-val">95%</span>
             </div>
-            <input id="spectrogram-overlap" type="range" min="50" max="95" step="1" value="75"
+            <input id="spectrogram-overlap" type="range" min="50" max="95" step="1" value="95"
               style="width:100%"
               oninput="document.getElementById('spectrogram-overlap-label').textContent=this.value+'%'; onSpectrogramSettingsChange()">
             <div class="field-row">
               <label>Мин. частота</label>
-              <select id="spectrogram-fmin" style="flex:1;width:auto" onchange="onSpectrogramSettingsChange()">
+              <select id="spectrogram-fmin" onchange="onSpectrogramSettingsChange()">
                 <option value="0" selected>0 (пост. составл.)</option>
                 <option value="0.0078125">128 бар</option>
                 <option value="0.015625">64 бара</option>
@@ -1201,7 +1328,7 @@
             </div>
             <div class="field-row">
               <label>Макс. частота</label>
-              <select id="spectrogram-fmax" style="flex:1;width:auto" onchange="onSpectrogramSettingsChange()">
+              <select id="spectrogram-fmax" onchange="onSpectrogramSettingsChange()">
                 <option value="0.5" selected>2 бара (Найквист)</option>
                 <option value="0.25">4 бара</option>
                 <option value="0.125">8 бар</option>

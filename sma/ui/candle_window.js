@@ -13,7 +13,7 @@
 
 import { S } from './state.js';
 import { api, setStatus } from './api.js';
-import { renderChart, getCurrentRanges, registerRelayoutHook } from './chart.js';
+import { renderChart, getCurrentRanges, registerRelayoutHook, displayNeedsRefresh } from './chart.js';
 
 let _fetching = false;
 
@@ -54,8 +54,20 @@ async function _fetchOlderChunk() {
   }
 }
 
+// Re-slicing the drawn window is a full Plotly.react. A zoom or pan gesture
+// fires plotly_relayout on every wheel tick / drag step, so doing it per event
+// repaints the chart mid-gesture (visible as jitter). Wait for the gesture to
+// go quiet first; the older-data fetch stays immediate (it's a network call,
+// not a repaint).
+const DISPLAY_REFRESH_IDLE_MS = 200;
+let _displayRefreshTimer = null;
+
 export function initCandleWindowing() {
   registerRelayoutHook(() => {
+    clearTimeout(_displayRefreshTimer);
+    _displayRefreshTimer = setTimeout(() => {
+      if (displayNeedsRefresh()) renderChart({ preserveRange: true });
+    }, DISPLAY_REFRESH_IDLE_MS);
     if (_shouldFetchOlder()) _fetchOlderChunk();
   });
 }

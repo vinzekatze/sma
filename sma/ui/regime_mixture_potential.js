@@ -23,6 +23,7 @@ import { renderChart, setOrigin, resolveOriginCandle } from './chart.js';
 import { refreshTasks } from './tasks.js';
 import { registerModelHandlers, loadAndRenderForecast } from './forecast_history.js';
 import { registerTool } from './tools.js';
+import { saveToolDisplayDefaults } from './settings.js';
 
 registerModelHandlers('regime_mixture_potential', {
   onSelected(f) {
@@ -112,6 +113,22 @@ export async function loadPotentialDefaults() {
   } catch (_) {
     applyPotentialParams(_paramsFromState());
   }
+  applyGlobalPotentialDisplay(); // "Границы покрытия" checkbox + slider — GLOBAL, not per-ticker (project request 2026-10-04), see below
+}
+
+// GLOBAL standing preference (settings.js:saveToolDisplayDefaults /
+// sma/core/db.py:DEFAULT_TOOL_DISPLAY), unlike coverage_pct INSIDE
+// S.potentialParams above — that one is a model SUBMISSION parameter
+// (per-ticker, forecast_defaults), a different thing with a similar name;
+// S.potentialShowBounds/potentialCoveragePct are purely the client-side
+// "Отображение" slider (see onPotentialCoverageInput's own docstring).
+// Re-applied every ticker switch (idempotent), same pattern trend_ruler's
+// showOnChart already uses.
+function applyGlobalPotentialDisplay() {
+  const g = S.toolDisplayDefaults.regime_mixture_potential;
+  S.potentialShowBounds = g.showBounds;
+  document.getElementById('potential-show-bounds').checked = g.showBounds;
+  _setPotentialCoverage(g.coveragePct);
 }
 
 function _paramsFromState() {
@@ -191,7 +208,9 @@ export function onPotentialColorXYChange(x, y) {
 
 export function onPotentialShowBoundsChange() {
   S.potentialShowBounds = document.getElementById('potential-show-bounds').checked;
+  S.toolDisplayDefaults.regime_mixture_potential.showBounds = S.potentialShowBounds;
   renderChart({ preserveRange: true });
+  saveToolDisplayDefaults();
 }
 
 // Coverage slider — unlike risk_corridor's coverage (which re-fetches exact
@@ -203,7 +222,9 @@ export function onPotentialShowBoundsChange() {
 // same "instant" feel as the heatmap-mode/rewind/XY-pad controls.
 export function onPotentialCoverageInput(pct) {
   _setPotentialCoverage(+pct);
+  S.toolDisplayDefaults.regime_mixture_potential.coveragePct = +pct;
   renderChart({ preserveRange: true });
+  saveToolDisplayDefaults();
 }
 
 function _setPotentialCoverage(pct) {

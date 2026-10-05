@@ -10,7 +10,9 @@ branch, not by building the abstraction preemptively).
 Ported from prototype/forcaster/ui/app.py's "Спектрограмма Δratio" expander
 (2026-06, still present unmodified in later prototype revisions before the
 UI itself moved on) — same scipy call, same causal logtrend signal (see
-sma/core/forecast/normalize.py), same filter-bank cutoff reference lines.
+sma/core/forecast/normalize.py). Used to also draw filter-bank cutoff
+reference lines (see CLAUDE.md "Filter bank") on the chart — removed
+2026-10-04, project feedback: unclear/redundant in practice.
 """
 
 from __future__ import annotations
@@ -21,23 +23,6 @@ from scipy.signal import spectrogram as _scipy_spectrogram
 from ..forecast.normalize import normalize
 
 MIN_DRATIO_POINTS = 32  # same floor the prototype used
-
-# Filter-bank cutoff frequencies (see CLAUDE.md "Filter bank"): causal
-# Butterworth Wn values for the C0..C5 band edges. fc = Wn * Nyquist = Wn/2
-# at fs=1 (one sample per bar). Drawn as horizontal reference lines on the
-# spectrogram so a period band the LP-attractor pipeline cares about is
-# visible at a glance.
-_CUTOFF_WN = [0.25, 0.125, 0.0625, 0.03125, 0.015625]
-_CUTOFF_LABELS = ["C0/C1", "C1/C2", "C2/C3", "C3/C4", "C4/C5"]
-
-
-def filter_bank_cutoffs() -> list[dict]:
-    """[{label, freq (cycles/bar), period_bars}, ...] for the C0..C5 band edges."""
-    out = []
-    for wn, label in zip(_CUTOFF_WN, _CUTOFF_LABELS):
-        fc = wn / 2.0
-        out.append({"label": label, "freq": fc, "period_bars": round(1.0 / fc)})
-    return out
 
 
 def compute_spectrogram(
@@ -54,7 +39,7 @@ def compute_spectrogram(
 
     Returns {"times": [...ISO date str, one per STFT time-step],
     "freqs": [...cycles/bar], "sxx_db": [[...]] (freq-major, matches
-    scipy.signal.spectrogram's own axis order), "cutoffs": filter_bank_cutoffs(),
+    scipy.signal.spectrogram's own axis order),
     "meta": {"n_bars", "freq_resolution", "time_step_bars", "nperseg", "noverlap"}}.
 
     Raises ValueError if there isn't enough history (< MIN_DRATIO_POINTS
@@ -99,7 +84,6 @@ def compute_spectrogram(
         "times": times,
         "freqs": f_spec[fmask].tolist(),
         "sxx_db": sxx_db[fmask, :].tolist(),
-        "cutoffs": filter_bank_cutoffs(),
         "meta": {
             "n_bars": n,
             "freq_resolution": 1.0 / nperseg,

@@ -1,12 +1,12 @@
 import { S } from './state.js';
-import { api } from './api.js';
-import { renderChart } from './chart.js';
+import { api, setStatus } from './api.js';
+import { renderChart, displayIndexRange } from './chart.js';
 import { registerTool, isToolObjectVisible } from './tools.js';
 import { getToolShowOnChart, saveToolShowOnChart } from './local_prefs.js';
 
 // ── moving_averages analyzer (Основной график tab) ──────────────────────
 // N configurable moving averages, own type (SMA/EMA/WMA) + period each —
-// purely client-side (S.candles already loaded), no origin concept (each
+// computed by the backend over the full history, no origin concept (each
 // line is a whole-history rolling series, not window-relative like
 // trend_ruler). Recomputed on every settings change — even a few hundred-
 // period MA over a few thousand candles is a trivial amount of JS work,
@@ -32,52 +32,6 @@ function colorFor(index) {
 }
 
 // ── math (causal — null before `period` closes are available) ──────────
-
-function sma(closes, period) {
-  const out = new Array(closes.length).fill(null);
-  let sum = 0;
-  for (let i = 0; i < closes.length; i++) {
-    sum += closes[i];
-    if (i >= period) sum -= closes[i - period];
-    if (i >= period - 1) out[i] = sum / period;
-  }
-  return out;
-}
-
-function wma(closes, period) {
-  const out = new Array(closes.length).fill(null);
-  const denom = period * (period + 1) / 2;
-  for (let i = period - 1; i < closes.length; i++) {
-    let acc = 0;
-    for (let j = 0; j < period; j++) acc += closes[i - period + 1 + j] * (j + 1);
-    out[i] = acc / denom;
-  }
-  return out;
-}
-
-function ema(closes, period) {
-  const out = new Array(closes.length).fill(null);
-  const alpha = 2 / (period + 1);
-  let prev = null;
-  for (let i = 0; i < closes.length; i++) {
-    if (i < period - 1) continue;
-    if (i === period - 1) {
-      let sum = 0;
-      for (let j = 0; j <= i; j++) sum += closes[j];
-      prev = sum / period; // seed = SMA of the first `period` points
-    } else {
-      prev = closes[i] * alpha + prev * (1 - alpha);
-    }
-    out[i] = prev;
-  }
-  return out;
-}
-
-function computeSeries(closes, type, period) {
-  if (type === 'ema') return ema(closes, period);
-  if (type === 'wma') return wma(closes, period);
-  return sma(closes, period);
-}
 
 // ── series list UI ───────────────────────────────────────────────────────
 
@@ -125,8 +79,8 @@ export function addMovingAverage() {
 
 // ── settings persist + recompute ─────────────────────────────────────────
 
-export function onMaSettingsChange() {
-  recompute();
+export async function onMaSettingsChange() {
+  await recompute();
   redraw();
   saveMaSettings();
 }
@@ -156,17 +110,29 @@ function isMaVisible() {
   return isToolObjectVisible('moving_averages', S.maSettings.showOnChart);
 }
 
-function recompute() {
-  if (!S.candles.length) { S.maData = {}; return; }
-  const closes = S.candles.map(c => c.close);
-  const times = S.candles.map(c => c.begin);
-  const out = {};
-  for (const s of S.maSettings.series) {
-    if (s.period >= 2 && s.period <= closes.length) {
-      out[s.id] = { times, values: computeSeries(closes, s.type, s.period) };
-    }
+// Values come from the BACKEND over the full stored history
+// (POST /series/moving-averages → sma/core/analysis/moving_averages.py),
+// not from the loaded candle window. Sequenced: only the newest response is
+// applied. Switching ticker/interval drops the previous lines at once.
+let _maSeq = 0;
+let _maKey = null;
+
+async function recompute() {
+  const seq = ++_maSeq;
+  const key = `${S.dataSource}|${S.ticker}|${S.interval}`;
+  if (key !== _maKey) { S.maData = {}; _maKey = key; }
+  if (!S.instrumentId) { S.maData = {}; return; }
+  const series = S.maSettings.series
+    .filter(s => s.period >= 2)
+    .map(s => ({ id: s.id, type: s.type, period: s.period }));
+  try {
+    const res = await api('POST', '/series/moving-averages', {
+      ticker: S.ticker, data_source: S.dataSource, interval: S.interval, series,
+    });
+    if (seq === _maSeq) S.maData = res;
+  } catch (e) {
+    if (seq === _maSeq) setStatus(e.message, 'err');
   }
-  S.maData = out;
 }
 
 function applyMaSettings(p) {
@@ -210,7 +176,7 @@ function saveMaSettings() {
 // analysis_settings row had.
 export function initMaForTicker() {
   renderMaList();
-  recompute();
+  recompute().then(() => redraw()); // values arrive from the backend (full history)
   S.maSettings.showOnChart = getToolShowOnChart('moving_averages', S.maSettings.showOnChart);
   updateShowChartButton();
 }
@@ -221,9 +187,11 @@ function buildMaMainTraces() {
   return S.maSettings.series.map((s, i) => {
     const d = S.maData[s.id];
     if (!d) return null;
+    // values cover the full history; only the displayed slice is drawn
+    const [i0, i1] = displayIndexRange(d.times);
     return {
       type: 'scatter', mode: 'lines', name: `${s.type.toUpperCase()}(${s.period})`,
-      x: d.times, y: d.values,
+      x: d.times.slice(i0, i1), y: d.values.slice(i0, i1),
       line: { color: colorFor(i), width: 1.5 },
       connectgaps: false,
     };

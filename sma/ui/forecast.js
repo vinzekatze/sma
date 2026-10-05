@@ -36,10 +36,8 @@ registerTool({
   icon: 'band',
   label: 'Band Lambda — полоса неопределённости',
   panelId: 'tool-panel-band_lambda',
-  onOriginClick(ts) {
-    setOrigin(ts);
-    updateForecastButtonLabel();
-  },
+  onOriginClick: setOrigin,
+  onMainOriginChanged: updateForecastButtonLabel,
 });
 
 // ── band_lambda params (T/m/theta — free live parameters, see state.js) ────
@@ -285,6 +283,14 @@ export function updateForecastButtonLabel() {
 
 // ── submit / progress ────────────────────────────────────────────────────
 
+// `until` is inclusive and `limit` takes the last row ≤ begin, so one row
+// back is the bar itself when it exists.
+async function _findCandleByBegin(begin) {
+  const rows = await api('GET',
+    `/candles?ticker=${S.ticker}&data_source=${S.dataSource}&interval=${S.interval}&until=${begin}&limit=1`);
+  return rows.find(r => r.begin === begin) ?? null;
+}
+
 export async function submitForecast() {
   if (!S.instrumentId) { setStatus('Сначала загрузите свечи', 'err'); return; }
   if (S.selectedTs == null) { setStatus('Укажите T (порог зигзага)', 'err'); return; }
@@ -292,7 +298,9 @@ export async function submitForecast() {
   let originCandleId = null;
   const pivot = findOriginPivot();
   if (pivot) {
-    const candle = S.candles.find(c => c.begin === pivot.confirm_date);
+    // S.candles holds only the loaded window (sma/ui/candle_window.js) — an
+    // older pivot may sit outside it, so ask the backend for that exact bar.
+    const candle = S.candles.find(c => c.begin === pivot.confirm_date) ?? await _findCandleByBegin(pivot.confirm_date);
     if (!candle) { setStatus('Не найден бар для события — обновите зигзаг', 'err'); return; }
     originCandleId = candle.id;
   }
@@ -332,7 +340,7 @@ export async function submitForecast() {
   }
 }
 
-// ── display settings: levels (checkboxes), уровень доверия, opacity, width,
+// ── display settings: levels (checkboxes), граница шага 2, opacity, width,
 // presets ────────────────────────────────────────────────────────────────
 // Levels/opacity/trade-level/toggles persist together as one display_preset
 // (see chart.js:buildBandZoneShapes for how they're consumed). Width has no

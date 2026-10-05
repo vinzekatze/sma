@@ -1,9 +1,10 @@
 import { S } from './state.js';
 import { api, setStatus } from './api.js';
-import { renderChart, futureDateAt, paperY } from './chart.js';
+import { renderChart, paperY } from './chart.js';
 import { registerTool, isToolObjectVisible } from './tools.js';
 import { getToolShowOnChart, saveToolShowOnChart } from './local_prefs.js';
-import { hexToRgbTriplet, hexToRgba } from './color_utils.js';
+import { hexToRgbTriplet } from './color_utils.js';
+import { saveToolDisplayDefaults } from './settings.js';
 
 // ── trend_ruler analyzer (Основной график tab) ──────────────────────────
 // Main-chart half of what used to be a single combined "trend_variance"
@@ -20,9 +21,9 @@ import { hexToRgbTriplet, hexToRgba } from './color_utils.js';
 //
 // Design points carried over from before the split (project feedback
 // 2026-08-18, earlier rounds):
-// - Reacts INSTANTLY to every settings tweak — ported single_window_trend's
-//   OLS math to JS so it runs on S.candles (already loaded, see
-//   app.js:loadCandles) without a round trip.
+// - Display-only tweaks react INSTANTLY; window/bands/origin/extension are
+//   computed by the backend over the full history (debounced request, see
+//   refreshTrendRulerPreview).
 // - "Показывать на графике" is an explicit, persistent toggle (default
 //   OFF), independent of tab/which tool is active — same model as forecast
 //   pins, so several analyzers can show their own chart objects at once.
@@ -36,150 +37,40 @@ function redraw() {
 }
 
 // ── client-side port of sma/core/analysis/trend_variance.py ────────────
-// Same math as rolling_trend_variance/single_window_trend, just not
-// vectorized (window/m_accel-bounded loops are plenty fast in JS).
+// Live preview is computed on the BACKEND over the full stored history
+// (POST /series/trend-ruler → sma/core/analysis/trend_ruler.py), not on the
+// loaded candle window — the chart's candle limit is display-only.
+// Sequenced: only the newest response is applied; settings edits are
+// debounced so a slider drag sends one request, not one per tick.
+let _trSeq = 0;
+let _trTimer = null;
 
-// OLS fit of logPrices[origin-window+1 .. origin] — mirrors
-// trend_variance.py:single_window_trend.
-function localWindowTrend(logPrices, origin, window) {
-  const j0 = origin - window + 1;
-  if (j0 < 0) return null;
-  const n = window;
-  let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
-  for (let i = 0; i < n; i++) {
-    const y = logPrices[j0 + i];
-    sumX += i; sumY += y; sumXY += i * y; sumXX += i * i;
-  }
-  const denom = n * sumXX - sumX * sumX;
-  const s = (n * sumXY - sumX * sumY) / denom;
-  const b = (sumY - s * sumX) / n;
-  const fitted = new Array(n);
-  let ssr = 0;
-  for (let i = 0; i < n; i++) {
-    fitted[i] = b + s * i;
-    const resid = logPrices[j0 + i] - fitted[i];
-    ssr += resid * resid;
-  }
-  return { j0, fitted, std: Math.sqrt(ssr / (n - 2)), slope: s };
-}
-
-// slope[t] for t in [window-1, y.length-1] — mirrors
-// trend_variance.py:rolling_trend_variance (var not needed here — that's
-// variance_oscillator.js's job now — the accel fan only ever reads slope).
-// O(n), same cumulative-sum trick.
-function rollingSlope(y, window) {
-  const n = y.length;
-  const slope = new Array(n).fill(null);
-  if (window < 3 || n < window) return slope;
-  const csY = new Float64Array(n + 1), csJY = new Float64Array(n + 1);
-  for (let i = 0; i < n; i++) {
-    csY[i + 1] = csY[i] + y[i];
-    csJY[i + 1] = csJY[i] + i * y[i];
-  }
-  const w = window;
-  const Sx = w * (w - 1) / 2;
-  const Sxx = (w - 1) * w * (2 * w - 1) / 6;
-  const denom = w * Sxx - Sx * Sx;
-  for (let t = w - 1; t < n; t++) {
-    const j0 = t - w + 1;
-    const Sy = csY[t + 1] - csY[j0];
-    const Sxy = (csJY[t + 1] - csJY[j0]) - j0 * Sy;
-    slope[t] = (w * Sxy - Sx * Sy) / denom;
-  }
-  return slope;
-}
-
-// Mirrors trend_variance.py:_slope_window_for_accel — slope at each of the
-// last m_accel points ending at origin, on the minimal sub-array (not the
-// full history).
-function accelFan(logPrices, origin, window, mAccel, nAccel, localSlope, fittedLog) {
-  const subStart = Math.max(0, origin - window - mAccel + 2);
-  const subLog = logPrices.slice(subStart, origin + 1);
-  const slopeSub = rollingSlope(subLog, window);
-  const originLocal = slopeSub.length - 1;
-  const fit = localWindowTrend(slopeSub, originLocal, mAccel);
-  if (!fit) return null;
-  const d0 = (fit.fitted[fit.fitted.length - 1] - fit.fitted[0]) / (mAccel - 1);
-  const slopeHyp = localSlope + nAccel * d0;
-  const price = new Array(window);
-  for (let i = 0; i < window; i++) price[i] = Math.exp(fittedLog[0] + slopeHyp * i);
-  return { price, direction: d0 >= 0 ? 'up' : 'down', d0 };
-}
-
-function extensionBands(fittedLog, stdLog, localSlope, bandList, nFuture) {
-  if (!bandList.length) return null;
-  const trendPrice = [];
-  const bandsOut = bandList.map(k => ({ k, hi: [], lo: [] }));
-  for (let h = 0; h <= nFuture; h++) {
-    const logv = fittedLog[fittedLog.length - 1] + h * localSlope;
-    trendPrice.push(Math.exp(logv));
-    bandList.forEach((k, idx) => {
-      bandsOut[idx].hi.push(Math.exp(logv + k * stdLog));
-      bandsOut[idx].lo.push(Math.exp(logv - k * stdLog));
+async function refreshTrendRulerPreview() {
+  if (!S.instrumentId) return;
+  const seq = ++_trSeq;
+  const settings = S.trendRulerSettings;
+  try {
+    const preview = await api('POST', '/series/trend-ruler', {
+      ticker: S.ticker, data_source: S.dataSource, interval: S.interval,
+      window: settings.window, bands: settings.bands,
+      origin_ts: S.trendRulerOriginTs ?? null,
+      need_extension: settings.extendBands || settings.extendBorders,
+      n_future: settings.nFuture,
     });
+    if (seq !== _trSeq) return;
+    if (preview) {
+      S.trendRulerData = preview;
+      document.getElementById('tr-meta').textContent =
+        `origin=${preview.origin_date.slice(0, 10)} · окно=${preview.window} · полос=${preview.bands.length}`;
+    } else {
+      // Not enough history before the origin for this window. Previous data
+      // stays drawn, same as before the move to the backend.
+      setStatus(`Недостаточно истории до этой точки для окна ${settings.window}`, 'err');
+    }
+    redraw();
+  } catch (e) {
+    if (seq === _trSeq) setStatus(e.message, 'err');
   }
-  return { n_future: nFuture, trend_price: trendPrice, bands: bandsOut };
-}
-
-// This analyzer's own origin resolves independently of any other analyzer's
-// (S.originTs is the Прогноз tab's, untouched here) — null means "live",
-// i.e. the last available bar. A click gives an exact date match almost
-// always; the at-or-before fallback only matters for stale ISO strings.
-function resolveOriginIndex(candles, originTs) {
-  if (!originTs) return candles.length - 1;
-  const targetDate = String(originTs).slice(0, 10);
-  const exact = candles.findIndex(c => c.begin.slice(0, 10) === targetDate);
-  if (exact !== -1) return exact;
-  for (let i = candles.length - 1; i >= 0; i--) {
-    if (candles[i].begin.slice(0, 10) <= targetDate) return i;
-  }
-  return candles.length - 1;
-}
-
-// Returns null if there isn't enough history before the origin for the
-// current settings. Silently, on purpose — the form is mid-edit, not worth
-// a toast, except when the null was caused by an explicit click, handled
-// by the caller (setStatus in onTrendRulerSettingsChange).
-function computeLivePreview(candles, settings, originTs) {
-  const n = candles.length;
-  if (!n || settings.window < 3) return null;
-  const origin = resolveOriginIndex(candles, originTs);
-  let originMin = settings.window - 1;
-  if (settings.showAccelFan) originMin = Math.max(originMin, settings.window + settings.mAccel - 2);
-  if (origin < originMin) return null;
-
-  const logPrices = candles.map(c => Math.log(c.close));
-  const fit = localWindowTrend(logPrices, origin, settings.window);
-  if (!fit) return null;
-
-  const segTimes = candles.slice(fit.j0, origin + 1).map(c => c.begin);
-  const fittedPrice = fit.fitted.map(Math.exp);
-  const bandList = [...new Set(settings.bands.filter(k => k > 0))].sort((a, b) => b - a);
-  const bandsOut = bandList.map(k => ({
-    k,
-    hi: fit.fitted.map(v => Math.exp(v + k * fit.std)),
-    lo: fit.fitted.map(v => Math.exp(v - k * fit.std)),
-  }));
-
-  // Extension is computed whenever EITHER extrapolation flag is on — the
-  // drawing side (buildTrendRulerMainTraces) then independently decides
-  // whether to render the fill and/or the border portion of it, so
-  // "extrapolate bands but not borders" (or vice versa) is just a display
-  // choice on the SAME computed data, not two separate computations.
-  const needExtension = settings.extendBands || settings.extendBorders;
-
-  return {
-    origin_date: candles[origin].begin,
-    window: settings.window,
-    trend: { times: segTimes, price: fittedPrice },
-    bands: bandsOut,
-    extension: needExtension
-      ? extensionBands(fit.fitted, fit.std, fit.slope, bandList, settings.nFuture)
-      : null,
-    accel_fan: settings.showAccelFan
-      ? accelFan(logPrices, origin, settings.window, settings.mAccel, settings.nAccel, fit.slope, fit.fitted)
-      : null,
-  };
 }
 
 // ── bands list UI (произвольное число полос — project feedback 2026-08-18:
@@ -240,9 +131,6 @@ function readTrendRulerSettings() {
     // so it survives every OTHER settings change reassigning
     // S.trendRulerSettings wholesale below.
     showOnChart:     S.trendRulerSettings.showOnChart,
-    showAccelFan:    document.getElementById('tr-show-accel-fan').checked,
-    mAccel:          +document.getElementById('tr-m-accel').value,
-    nAccel:          +document.getElementById('tr-n-accel').value,
   };
 }
 
@@ -258,9 +146,6 @@ function applyTrendRulerSettings(p) {
   document.getElementById('tr-extend-bands').checked = !!p.extendBands;
   document.getElementById('tr-extend-borders').checked = p.extendBorders !== false;
   document.getElementById('tr-n-future').value = p.nFuture;
-  document.getElementById('tr-show-accel-fan').checked = !!p.showAccelFan;
-  document.getElementById('tr-m-accel').value = p.mAccel;
-  document.getElementById('tr-n-accel').value = p.nAccel;
   S.trendRulerSettings = { ...p, bands: [...p.bands] };
   renderBandsList();
   updateShowChartButton();
@@ -286,30 +171,56 @@ function updateShowChartButton() {
     ?.classList.toggle('active', !!S.trendRulerSettings.showOnChart);
 }
 
-// Last-used settings for this (instrument, interval) — same mechanism as
-// analysis.js:loadSpectrogramDefaults.
+// Last-used WINDOW/BANDS for this (instrument, interval) — per-ticker,
+// unlike the rest of the panel below (project request 2026-10-04: "для
+// тренд линейки... кроме настроек окна и самих полос - они нужны
+// per-tiker"). Merged with S.toolDisplayDefaults.trend_ruler's GLOBAL slice
+// (already loaded once at startup, see settings.js:loadAppSettings) — that
+// merge is what applyTrendRulerSettings actually writes to the form/state,
+// so the rest of this module never needs to know which field came from
+// which source.
 export async function loadTrendRulerDefaults() {
   if (!S.instrumentId) return;
+  let perTicker = { window: 200, bands: [2.0] };
   try {
     const res = await api(
       'GET',
       `/series/analysis-settings?instrument_id=${S.instrumentId}&interval=${S.interval}&analyzer_type=trend_ruler`
     );
-    if (res.params) applyTrendRulerSettings(res.params);
+    if (res.params?.window) perTicker = { window: res.params.window, bands: res.params.bands };
   } catch (_) { /* non-fatal — keeps current form values */ }
+  applyTrendRulerSettings({
+    ...perTicker, ...S.toolDisplayDefaults.trend_ruler,
+    showOnChart: S.trendRulerSettings.showOnChart,
+  });
 }
 
 let _trendRulerSaveTimer = null;
 
+// Per-ticker half only — window + bands, see module docstring above.
 function saveTrendRulerSettings() {
   if (!S.instrumentId) return;
   clearTimeout(_trendRulerSaveTimer);
   _trendRulerSaveTimer = setTimeout(() => {
     api('POST', '/series/analysis-settings', {
       instrument_id: S.instrumentId, interval: S.interval,
-      analyzer_type: 'trend_ruler', params: S.trendRulerSettings,
+      analyzer_type: 'trend_ruler',
+      params: { window: S.trendRulerSettings.window, bands: S.trendRulerSettings.bands },
     }).catch(() => {});
   }, 500);
+}
+
+// Global half — everything else in the panel (bands fill/border display,
+// opacity, extension toggles, n_future). settings.js:saveToolDisplayDefaults
+// owns the actual debounce/POST, shared across every tool that uses this
+// mechanism, so this just updates the in-memory slice and asks it to save.
+function saveGlobalTrendRulerDisplay() {
+  const s = S.trendRulerSettings;
+  S.toolDisplayDefaults.trend_ruler = {
+    showBands: s.showBands, showBandBorders: s.showBandBorders, bandOpacity: s.bandOpacity,
+    extendBands: s.extendBands, extendBorders: s.extendBorders, nFuture: s.nFuture,
+  };
+  saveToolDisplayDefaults();
 }
 
 // ── reactive live preview — this analyzer's entire compute/draw cycle
@@ -327,17 +238,12 @@ function updateOriginLabel() {
 export function onTrendRulerSettingsChange() {
   const settings = readTrendRulerSettings();
   S.trendRulerSettings = settings;
-  const preview = computeLivePreview(S.candles, settings, S.trendRulerOriginTs);
-  if (preview) {
-    S.trendRulerData = preview;
-    document.getElementById('tr-meta').textContent =
-      `origin=${preview.origin_date.slice(0, 10)} · окно=${preview.window} · полос=${preview.bands.length}`;
-  } else if (S.candles.length) {
-    setStatus(`Недостаточно истории до этой точки для окна ${settings.window}`, 'err');
-  }
   updateOriginLabel();
-  redraw();
-  saveTrendRulerSettings();
+  redraw(); // display-only changes apply at once on the data we already have
+  clearTimeout(_trTimer);
+  _trTimer = setTimeout(refreshTrendRulerPreview, 250); // window/bands/origin/extension need the backend
+  saveTrendRulerSettings();       // per-ticker: window + bands
+  saveGlobalTrendRulerDisplay();  // global: bands display/opacity/extension/n_future
 }
 
 export function onTrendRulerWindowInput(value) {
@@ -456,10 +362,10 @@ function buildTrendRulerMainTraces() {
   // trend_variance.py module docstring. The center trend line itself is
   // never continued, only the bands (fill and/or border, per the two
   // extend* flags — d.extension itself is computed whenever EITHER is on,
-  // see computeLivePreview).
+  // see refreshTrendRulerPreview).
   if (d.extension && (extendBands || extendBorders)) {
     const ext = d.extension;
-    const extTimes = Array.from({ length: ext.n_future + 1 }, (_, h) => futureDateAt(d.origin_date, h, S.interval, S.candles));
+    const extTimes = ext.times; // computed by the backend (sma/core/analysis/trend_ruler.py)
     if (extendBands) {
       ext.bands.forEach(b => {
         traces.push({
@@ -484,27 +390,6 @@ function buildTrendRulerMainTraces() {
         });
       });
     }
-  }
-
-  // "Fan" — where the window's trend line would land if the measured
-  // (m_accel-averaged) acceleration acted for n_accel more steps, drawn
-  // strictly WITHIN the window (not a forecast either — see accel_fan
-  // computation in trend_variance.py).
-  if (d.accel_fan) {
-    const fillColor = hexToRgba(
-      d.accel_fan.direction === 'up' ? S.colorProfile.trend_ruler_accel_up : S.colorProfile.trend_ruler_accel_down,
-      0.25,
-    );
-    traces.push({
-      type: 'scatter', mode: 'lines', x: trend.times, y: trend.price,
-      line: { width: 0 }, showlegend: false, hoverinfo: 'skip',
-    });
-    traces.push({
-      type: 'scatter', mode: 'lines', name: 'тренд + n·ускорение',
-      x: trend.times, y: d.accel_fan.price,
-      line: { color: S.colorProfile.trend_ruler_accel_line, width: 1.5, dash: 'dot' },
-      fill: 'tonexty', fillcolor: fillColor,
-    });
   }
 
   return traces;

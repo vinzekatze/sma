@@ -216,6 +216,9 @@ _MIGRATIONS = [
     "ALTER TABLE display_presets  ADD COLUMN show_zones         INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE display_presets  ADD COLUMN show_trade_level   INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE display_presets  ADD COLUMN trim_zone1         INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE instruments      ADD COLUMN lot_size           INTEGER",
+    "ALTER TABLE instruments      ADD COLUMN price_step         REAL",
+    "ALTER TABLE app_settings     ADD COLUMN tool_display_json  TEXT",
 ]
 
 
@@ -385,18 +388,44 @@ async def set_favorite(
     await db.commit()
 
 
+async def set_instrument_trading_params(
+    db: aiosqlite.Connection,
+    instrument_id: int,
+    lot_size: int,
+    price_step: float,
+) -> None:
+    """Caches MOEX's LOTSIZE (shares per lot) + MINSTEP (price rounding
+    step) on the instrument row — fetched once on first use by the
+    risk-management tool (sma/api/routes/instruments.py:
+    get_trading_params_route), never refetched afterward (neither changes
+    in practice; a split/step change would be a rare manual fix, same as
+    any other MOEX-sourced instrument metadata here)."""
+    await db.execute(
+        "UPDATE instruments SET lot_size=?, price_step=? WHERE id=?",
+        (lot_size, price_step, instrument_id),
+    )
+    await db.commit()
+
+
 async def delete_instrument(
     db: aiosqlite.Connection,
     instrument_id: int,
 ) -> bool:
     """
     Cascading delete of an instrument and everything anchored to it.
-    candles drop automatically via ON DELETE CASCADE; tasks and forecasts
-    don't have that FK option, so they're removed explicitly first
-    (foreign_keys=ON would otherwise reject the instrument delete).
+    candles drop automatically via ON DELETE CASCADE; every other table that
+    references instruments(id) lacks that FK option, so each is removed
+    explicitly first (foreign_keys=ON would otherwise reject the instrument
+    delete — this was silently failing for any instrument that had ever
+    picked up a band_lambda_pool/range_forecast_settings/forecast_defaults/
+    analysis_settings row).
     """
     await db.execute("DELETE FROM tasks WHERE instrument_id=?", (instrument_id,))
     await db.execute("DELETE FROM forecasts WHERE instrument_id=?", (instrument_id,))
+    await db.execute("DELETE FROM band_lambda_pool WHERE instrument_id=?", (instrument_id,))
+    await db.execute("DELETE FROM range_forecast_settings WHERE instrument_id=?", (instrument_id,))
+    await db.execute("DELETE FROM forecast_defaults WHERE instrument_id=?", (instrument_id,))
+    await db.execute("DELETE FROM analysis_settings WHERE instrument_id=?", (instrument_id,))
     cursor = await db.execute("DELETE FROM instruments WHERE id=?", (instrument_id,))
     await db.commit()
     return cursor.rowcount > 0
@@ -476,6 +505,24 @@ async def get_candles(
         return [dict(r) for r in reversed(await cursor.fetchall())]
     q += " ORDER BY begin ASC"
     cursor = await db.execute(q, args)
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_candles_after(
+    db: aiosqlite.Connection,
+    instrument_id: int,
+    interval: str,
+    after: str,
+    limit: int,
+) -> list[dict]:
+    """First `limit` candles with begin strictly after `after`, ascending —
+    the forward window for trend_ruler's extension (get_candles' `limit` takes
+    the LAST rows, which is the wrong end here)."""
+    cursor = await db.execute(
+        "SELECT * FROM candles WHERE instrument_id=? AND interval=? AND begin > ? "
+        "ORDER BY begin ASC LIMIT ?",
+        (instrument_id, interval, after, limit),
+    )
     return [dict(r) for r in await cursor.fetchall()]
 
 
@@ -1165,9 +1212,6 @@ DEFAULT_COLOR_PROFILE: dict[str, Any] = {
     "next_origin_marker": "#58a6ff",
     "trend_ruler_line": "#1f77b4",
     "trend_ruler_origin": "#bc8cff",
-    "trend_ruler_accel_up": "#2ca02c",
-    "trend_ruler_accel_down": "#d62728",
-    "trend_ruler_accel_line": "#7f7f7f",
     "ma_palette": ["#f0883e", "#a5d6ff", "#d2a8ff", "#7ee787", "#ffa198", "#79c0ff"],
     "zigzag_tool_palette": ["#d29922", "#f0883e", "#a5d6ff", "#7ee787", "#ffa198", "#d2a8ff"],
     "forecast_zigzag": "#d29922",
@@ -1185,15 +1229,71 @@ DEFAULT_COLOR_PROFILE: dict[str, Any] = {
     "risk_corridor_close": "#ffffff",
     "risk_corridor_high": "#26a69a",
     "risk_corridor_low": "#ef5350",
+    "risk_calc_entry": "#58a6ff",
+    "risk_calc_stop": "#f85149",
+    "risk_calc_profit": "#3fb950",
     # ── Осциллятор ──
     "spectrogram_colorscale": "Viridis",
-    "spectrogram_cutoff_line": "#ff5050",
     "variance_slope_up": "#2ca02c",
     "variance_slope_down": "#d62728",
     "variance_var": "#9467bd",
+    "variance_slopevar": "#e8a33d",
     "volume_up": "#3fb950",
     "volume_down": "#f85149",
 }
+
+# Per-tool GLOBAL display defaults (project request 2026-10-04: "band_lambda
+# настройки отображения стали глобальными... давай для тренд линейки сделаем
+# тоже самое") — purely visual toggles that make sense as one standing
+# preference across every ticker, as opposed to each tool's PER-TICKER state
+# (trend_ruler's window/bands, simplex_ensemble's model params, etc. — still
+# analysis_settings, keyed by instrument_id, unaffected by this). One nested
+# dict here (not a column per tool) so adding a new tool's global slice later
+# never needs a migration — see _parse_tool_display's merge-forward-compat,
+# same idea as DEFAULT_COLOR_PROFILE above.
+DEFAULT_TOOL_DISPLAY: dict[str, Any] = {
+    "trend_ruler": {
+        "showBands": True, "showBandBorders": True, "bandOpacity": 0.18,
+        "extendBands": False, "extendBorders": True, "nFuture": 50,
+    },
+    "simplex_ensemble": {
+        "showMean": True, "bandPct": 75,
+    },
+    "regime_mixture_potential": {
+        "showBounds": False, "coveragePct": 95,
+    },
+    "volume_osc": {
+        "mode": "plain",
+    },
+    "variance_osc": {
+        "oscMode": "slope",
+    },
+    "spectrogram": {
+        "logY": False, "contrastPct": 5,
+    },
+    "risk_calc": {
+        "deposit": 300000, "riskPct": 2, "borrowPct": 13,
+    },
+}
+
+
+def _parse_tool_display(raw: str | None) -> dict:
+    """Merge stored JSON over DEFAULT_TOOL_DISPLAY one level deep (per tool,
+    not just top-level) so a NEW field added later to an EXISTING tool's
+    slice, or a whole new tool, always has a value even for rows saved
+    before it existed. Any stored tool key not (yet) in DEFAULT_TOOL_DISPLAY
+    is kept as-is rather than dropped — forward-compat the other direction."""
+    stored = {}
+    if raw:
+        try:
+            stored = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            stored = {}
+    merged = {tool: {**defaults, **(stored.get(tool) or {})} for tool, defaults in DEFAULT_TOOL_DISPLAY.items()}
+    for tool, val in stored.items():
+        if tool not in merged:
+            merged[tool] = val
+    return merged
 
 
 def _parse_color_profile(raw: str | None) -> dict:
@@ -1211,7 +1311,7 @@ def _parse_color_profile(raw: str | None) -> dict:
 
 async def get_app_settings(db: aiosqlite.Connection) -> dict:
     cursor = await db.execute(
-        "SELECT moex_pool_workers, calibration_workers, chart_window_bars, color_profile_json FROM app_settings WHERE id = 1"
+        "SELECT moex_pool_workers, calibration_workers, chart_window_bars, color_profile_json, tool_display_json FROM app_settings WHERE id = 1"
     )
     row = await cursor.fetchone()
     if row is None:
@@ -1220,12 +1320,14 @@ async def get_app_settings(db: aiosqlite.Connection) -> dict:
             "calibration_workers": DEFAULT_CALIBRATION_WORKERS,
             "chart_window_bars": DEFAULT_CHART_WINDOW_BARS,
             "color_profile": dict(DEFAULT_COLOR_PROFILE),
+            "tool_display": _parse_tool_display(None),
         }
     return {
         "moex_pool_workers": row["moex_pool_workers"],
         "calibration_workers": row["calibration_workers"],
         "chart_window_bars": row["chart_window_bars"],
         "color_profile": _parse_color_profile(row["color_profile_json"]),
+        "tool_display": _parse_tool_display(row["tool_display_json"]),
     }
 
 
@@ -1235,27 +1337,33 @@ async def save_app_settings(
     calibration_workers: int,
     chart_window_bars: int,
     color_profile: dict | None = None,
+    tool_display: dict | None = None,
 ) -> dict:
-    # color_profile=None means "leave whatever is already stored alone" —
-    # save_app_settings is also called from the moex/calibration-workers
-    # form (settings.js), which never sends a color profile and must not
-    # blow the stored one away with defaults.
+    # color_profile=None / tool_display=None means "leave whatever is
+    # already stored alone" — save_app_settings is also called from the
+    # moex/calibration-workers form (settings.js), which never sends either
+    # and must not blow away what's stored with defaults.
     if color_profile is None:
         existing = await get_app_settings(db)
         color_profile = existing["color_profile"]
+    if tool_display is None:
+        existing = await get_app_settings(db)
+        tool_display = existing["tool_display"]
     profile_json = json.dumps({**DEFAULT_COLOR_PROFILE, **color_profile})
+    tool_display_json = json.dumps(tool_display)
     await db.execute(
         """
-        INSERT INTO app_settings (id, moex_pool_workers, calibration_workers, chart_window_bars, color_profile_json, updated_at)
-        VALUES (1, ?, ?, ?, ?, ?)
+        INSERT INTO app_settings (id, moex_pool_workers, calibration_workers, chart_window_bars, color_profile_json, tool_display_json, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             moex_pool_workers   = excluded.moex_pool_workers,
             calibration_workers = excluded.calibration_workers,
             chart_window_bars   = excluded.chart_window_bars,
             color_profile_json  = excluded.color_profile_json,
+            tool_display_json   = excluded.tool_display_json,
             updated_at          = excluded.updated_at
         """,
-        (moex_pool_workers, calibration_workers, chart_window_bars, profile_json, datetime.now(timezone.utc).isoformat()),
+        (moex_pool_workers, calibration_workers, chart_window_bars, profile_json, tool_display_json, datetime.now(timezone.utc).isoformat()),
     )
     await db.commit()
     return await get_app_settings(db)

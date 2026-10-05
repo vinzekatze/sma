@@ -23,6 +23,7 @@ import { renderChart, setOrigin, resolveOriginCandle } from './chart.js';
 import { refreshTasks } from './tasks.js';
 import { registerModelHandlers, loadAndRenderForecast } from './forecast_history.js';
 import { registerTool } from './tools.js';
+import { saveToolDisplayDefaults } from './settings.js';
 
 // Wires this model into the unified history/selection system — when a
 // simplex_ensemble forecast becomes the selected one, refill its params form
@@ -118,6 +119,24 @@ export async function loadSimplexDefaults() {
   } catch (_) {
     applySimplexParams(S.simplexParams);
   }
+  applyGlobalSimplexDisplay(); // showMean/bandPct — GLOBAL, not per-ticker (project request 2026-10-04), see module docstring below
+}
+
+// show-mean toggle + band-width % are a GLOBAL standing preference (project
+// request 2026-10-04: "у симплекса тоже самое", same mechanism as
+// trend_ruler.js — see settings.js:saveToolDisplayDefaults /
+// sma/core/db.py:DEFAULT_TOOL_DISPLAY), unlike this model's actual
+// forecast PARAMS above (per-ticker, forecast_defaults). Re-applied on
+// every ticker switch (idempotent, same "harmless re-apply" pattern
+// trend_ruler's showOnChart already uses) rather than only once at
+// startup, since this module has no other per-ticker-switch init hook.
+function applyGlobalSimplexDisplay() {
+  const g = S.toolDisplayDefaults.simplex_ensemble;
+  S.simplexShowMean = g.showMean;
+  S.simplexBandPct = g.bandPct;
+  document.getElementById('simplex-show-mean').checked = g.showMean;
+  document.getElementById('simplex-band-pct').value = g.bandPct;
+  document.getElementById('simplex-band-pct-label').textContent = `${g.bandPct}%`;
 }
 
 // origin resolution: no zigzag/pivot here (unlike band_lambda's
@@ -171,19 +190,24 @@ export async function submitSimplexForecast() {
   }
 }
 
-// ── display: show-mean toggle, band-width slider (reactive, no re-fetch) ───
+// ── display: show-mean toggle, band-width slider (reactive, no re-fetch,
+// GLOBAL — see applyGlobalSimplexDisplay above) ──────────────────────────
 // MODEL_DISPLAY.simplex_ensemble.buildOverlay (chart.js) reads
-// S.simplexShowMean/S.simplexBandPct live at render time — these just update
-// that state and ask for a redraw, no result-lookup needed here.
+// S.simplexShowMean/S.simplexBandPct live at render time — these update
+// that state, mirror it into the global slice, ask for a redraw, and save.
 
 export function refreshSimplexDisplay() {
   S.simplexShowMean = document.getElementById('simplex-show-mean').checked;
+  S.toolDisplayDefaults.simplex_ensemble.showMean = S.simplexShowMean;
   renderChart({ preserveRange: true });
+  saveToolDisplayDefaults();
 }
 
 export function onSimplexBandPctChange(val) {
   S.simplexBandPct = +val;
+  S.toolDisplayDefaults.simplex_ensemble.bandPct = S.simplexBandPct;
   const label = document.getElementById('simplex-band-pct-label');
   if (label) label.textContent = `${val}%`;
   renderChart({ preserveRange: true });
+  saveToolDisplayDefaults();
 }

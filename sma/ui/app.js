@@ -1,7 +1,7 @@
 import { S } from './state.js';
 import { api, setBusy, setIdle, setStatus } from './api.js';
-import { renderChart, initChartEvents } from './chart.js';
-import { getTool, selectTool, resetActiveToolOrigin, renderToolbarButtons, renderToolbar } from './tools.js';
+import { renderChart, initChartEvents, clearMainOrigin } from './chart.js';
+import { getTool, selectTool, renderToolbarButtons, renderToolbar } from './tools.js';
 import { hydrateLocalPrefs } from './local_prefs.js';
 import { dialogConfirmClick, dialogCancelClick } from './dialog.js';
 import { initSpinInputs } from './spin_input.js';
@@ -22,7 +22,7 @@ import {
 } from './trend_ruler.js';
 import {
   onVarianceOscWindowInput, setVarianceOscMode, pullWindowFromRuler,
-  loadVarianceOscDefaults, initVarianceOscForTicker,
+  loadVarianceOscDefaults, initVarianceOscForTicker, onVarianceOscSlopeVarWindowInput,
 } from './variance_oscillator.js';
 import {
   addMovingAverage, onMaSettingsChange, loadMaDefaults, initMaForTicker, toggleMaShowChart,
@@ -30,7 +30,7 @@ import {
 import {
   addZigzagSeries, onZigzagToolShowChartChange, loadZigzagToolDefaults, initZigzagToolForTicker,
 } from './zigzag_tool.js';
-import './volume_oscillator.js'; // self-registers its tool on import — no settings/init to wire, see module docstring
+import { setVolumeOscMode, loadVolumeOscDefaults } from './volume_oscillator.js';
 import {
   loadBandLambdaDefaults, loadDisplayPresets,
   submitForecast, onBandTChange, onBandModelParamsChange, toggleZigzagPin,
@@ -57,8 +57,13 @@ import {
   toggleRiskCorridorShowChart,
 } from './risk_corridor.js';
 import {
+  loadRiskCalcDefaults, loadRiskCalcTradingParams, onRiskCalcSettingsChange,
+  onRiskCalcDirectionChange, onRiskCalcAnchorChange, setRiskCalcEntryToCurrent,
+  toggleRiskCalcPickOnChart, toggleRiskCalcShowChart,
+} from './risk_calculator.js';
+import {
   refreshHistory, loadAndRenderForecast, deleteForecast, toggleForecastPin, toggleSelectedForecastPin,
-  hydratePinnedForecasts,
+  hydratePinnedForecasts, hideAllForecastResults,
 } from './forecast_history.js';
 import {
   refreshAll, toggleAccordion, onQuickFilterInput, onGlobalIntervalChange,
@@ -80,6 +85,8 @@ window.toggleTrendRulerShowChart       = toggleTrendRulerShowChart;
 window.onVarianceOscWindowInput        = onVarianceOscWindowInput;
 window.setVarianceOscMode              = setVarianceOscMode;
 window.pullWindowFromRuler             = pullWindowFromRuler;
+window.onVarianceOscSlopeVarWindowInput = onVarianceOscSlopeVarWindowInput;
+window.setVolumeOscMode                = setVolumeOscMode;
 window.addMovingAverage       = addMovingAverage;
 window.onMaSettingsChange     = onMaSettingsChange;
 window.toggleMaShowChart      = toggleMaShowChart;
@@ -91,6 +98,12 @@ window.toggleRangeForecastShowChart  = toggleRangeForecastShowChart;
 window.onRiskCorridorSettingsChange  = onRiskCorridorSettingsChange;
 window.onRiskCorridorCoverageInput   = onRiskCorridorCoverageInput;
 window.toggleRiskCorridorShowChart   = toggleRiskCorridorShowChart;
+window.onRiskCalcSettingsChange      = onRiskCalcSettingsChange;
+window.onRiskCalcDirectionChange     = onRiskCalcDirectionChange;
+window.onRiskCalcAnchorChange        = onRiskCalcAnchorChange;
+window.setRiskCalcEntryToCurrent     = setRiskCalcEntryToCurrent;
+window.toggleRiskCalcPickOnChart     = toggleRiskCalcPickOnChart;
+window.toggleRiskCalcShowChart       = toggleRiskCalcShowChart;
 // Wrapped (not the bare tools.js export) so a tool switch also redraws the
 // chart — forecast marker visibility now depends on S.activeMainTool
 // (chart.js:forecastMarkersInView, project feedback 2026-08-19), so without
@@ -117,7 +130,14 @@ window.selectTool             = (type) => {
   selectTool(type);
   renderChart({ preserveRange: true });
 };
-window.resetActiveToolOrigin           = resetActiveToolOrigin;
+// Курсор reset button: the active tool's own origin if it has one (trend
+// ruler), otherwise the main origin — so every selected tool has something
+// to reset here.
+window.resetActiveToolOrigin = () => {
+  const tool = getTool(S.activeMainTool);
+  if (tool?.resetOrigin) tool.resetOrigin();
+  else clearMainOrigin();
+};
 window.toggleMainLogScale     = toggleMainLogScale;
 window.toggleObjectsHidden    = toggleObjectsHidden;
 window.fixPendingPriceLevel   = fixPendingPriceLevel;
@@ -221,12 +241,19 @@ async function loadCandles(ticker, dataSource, interval) {
     // current history), so leaving stale ids in place is harmless and lets
     // them "reappear" if the user switches back to the original ticker.
     S.selectedForecastId    = null;
+    hideAllForecastResults(); // previous ticker's forecast detail must not linger visible — see that function's docstring
     S.zigzagPivots          = [];
     resetZigzagPins();       // pinned T's price/date cache IS per-instrument (unlike pinnedForecastIds above) — see forecast.js
     S.selectedTs            = null; // loadBandLambdaDefaults() below sets it back (saved or fallback) before anything reads it
     S.bandLambdaPool        = null;
     S.bandAnnotations       = [];
     S.activeMainTool        = 'free'; // back to the default cursor tool — none of the others (analyzer/forecaster origins, price levels) carry meaningfully across a ticker switch
+    // Raw assignment above (not selectTool/activateTool) never fires
+    // risk_calc's own onDeselected — same reason clearPriceLevels right
+    // below has to run explicitly for price_level's pending state instead
+    // of relying on that hook.
+    S.riskCalcPickTarget    = null;
+    document.getElementById('chart')?.classList.remove('picking-price');
     // S.activeOscillatorTool/S.subpanel are NOT reset to 'none' any more
     // (same 2026-08-25 feedback, "...и осциляторов [не сохраняется]") — the
     // still-selected oscillator (if any) gets its onSelected hook
@@ -264,6 +291,7 @@ async function loadCandles(ticker, dataSource, interval) {
     await loadSpectrogramDefaults();  // last-used spectrogram params for this ticker (Осциллятор tab)
     await loadTrendRulerDefaults();   // last-used trend_ruler params for this ticker (Основной график tab)
     await loadVarianceOscDefaults();  // last-used variance_osc params for this ticker (Осциллятор tab)
+    await loadVolumeOscDefaults();    // last-used volume_osc mode for this ticker (Осциллятор tab)
     await loadMaDefaults();           // last-used moving_averages params (Основной график tab)
     await loadZigzagToolDefaults();   // last-used zigzag_tool params (Основной график tab)
     await loadPriceLevelDefaults();   // last-used fixed price levels for this ticker (project feedback 2026-08-20)
@@ -273,6 +301,8 @@ async function loadCandles(ticker, dataSource, interval) {
     initZigzagToolForTicker();        // re-fetch every configured zigzag series
     await initRangeForecastForTicker(); // live range forecast + refresh calibrated (H,p,theiler) list for the new instrument
     await initRiskCorridorForTicker();  // live risk-corridor — no calibration to refresh, params are global (см. план app27)
+    await loadRiskCalcTradingParams();  // lot+price step first — loadRiskCalcDefaults' first render below already needs them
+    await loadRiskCalcDefaults();       // last-planned trade for this ticker (entry/stop/tp/direction/anchor), analysis_settings
     // The still-active oscillator (if any survived the switch — see the
     // S.activeOscillatorTool comment above) needs its data refetched for
     // the NEW instrument: its own *Data field was nulled earlier in this

@@ -8,11 +8,12 @@ Ported from prototype_analyzers/app.py + analyzers/trend_variance.py
 (2026-08-17/18 prototype session, see docs/plans/
 trend_variance_analyzer_migration_plan.md for the full design rationale).
 Everything here is a MEASURED characteristic of the series (trend line,
-±k·std residual bands, slope/variance oscillator, an "acceleration fan"),
-NOT a price forecast — the prototype's predictability sweeps
-(slope_predictability_*.py, accel_predictability_sweep.py, price_forecast_*.py,
-not ported) found linear trend continuation loses to price persistence, so
-nothing here claims predictive value.
+±k·std residual bands, slope/variance oscillator), NOT a price forecast —
+the prototype's predictability sweeps (slope_predictability_*.py,
+accel_predictability_sweep.py, price_forecast_*.py, not ported) found
+linear trend continuation loses to price persistence, so nothing here
+claims predictive value. An "acceleration fan" variant used to live here
+too (removed 2026-10-04, project feedback: "оказался малоинформативным").
 
 Origin is always the LAST available bar (migration plan §3.2 "Вариант A") —
 no historical-origin picker in this first cut.
@@ -88,18 +89,6 @@ def _nan_to_none(arr: np.ndarray) -> list[float | None]:
     return [None if np.isnan(v) else float(v) for v in arr]
 
 
-def _slope_window_for_accel(log_price: np.ndarray, origin: int, window: int, m_accel: int) -> np.ndarray:
-    """slope values at each of the last m_accel points ending at origin,
-    computed on the MINIMAL sub-array that covers them (not the full
-    history) — used only when show_oscillator is False, so the
-    acceleration fan doesn't force the full O(n) rolling pass just to read
-    m_accel trailing slope values (see migration plan §2, правка 2026-08-18)."""
-    sub_start = max(0, origin - window - m_accel + 2)
-    sub_log = log_price[sub_start:origin + 1]
-    slope_sub, _ = rolling_trend_variance(sub_log, window)
-    return slope_sub
-
-
 def compute_trend_variance(
     candles: list[dict],
     window: int = 200,
@@ -107,9 +96,6 @@ def compute_trend_variance(
     show_extension: bool = False,
     n_future: int = 50,
     show_oscillator: bool = False,
-    show_accel_fan: bool = False,
-    m_accel: int = 50,
-    n_accel: int = 50,
 ) -> dict:
     """
     Returns a dict:
@@ -117,16 +103,13 @@ def compute_trend_variance(
        "trend": {"times", "price"},
        "bands": [{"k", "hi", "lo"}, ...],           # widest k first
        "extension": null or {"n_future", "trend_price", "bands": [...]},
-       "oscillator": null or {"times", "slope", "var"},
-       "accel_fan": null or {"price", "direction", "d0"}}
+       "oscillator": null or {"times", "slope", "var"}}
 
     `oscillator` is computed (and the full O(n) rolling_trend_variance pass
     paid for) ONLY when show_oscillator is True — see module docstring and
-    migration plan §2/§3.4. `accel_fan`, when requested WITHOUT the
-    oscillator, uses a cheap sub-array pass instead (_slope_window_for_accel).
+    migration plan §2/§3.4.
 
-    Raises ValueError if there isn't enough history for the requested
-    window (+ m_accel, if show_accel_fan).
+    Raises ValueError if there isn't enough history for the requested window.
     """
     if window < 3:
         raise ValueError("window должен быть >= 3")
@@ -137,8 +120,6 @@ def compute_trend_variance(
 
     origin = n - 1
     origin_min = window - 1
-    if show_accel_fan:
-        origin_min = max(origin_min, window + m_accel - 2)
     if origin < origin_min:
         raise ValueError(f"Недостаточно истории ({n} баров) для выбранных настроек.")
 
@@ -148,7 +129,7 @@ def compute_trend_variance(
     seg_times = dates[j0:origin + 1]
     # Same OLS slope rolling_trend_variance would give at t=origin (both are
     # the causal fit of the exact same window) — reading it off the fit we
-    # already computed means extension/accel-fan never need the full-history
+    # already computed means the extension never needs the full-history
     # rolling pass just to learn the CURRENT slope.
     local_slope = (fitted_log[-1] - fitted_log[0]) / (window - 1)
 
@@ -168,7 +149,6 @@ def compute_trend_variance(
         "bands": bands_out,
         "extension": None,
         "oscillator": None,
-        "accel_fan": None,
     }
 
     if show_extension and band_list:
@@ -188,32 +168,12 @@ def compute_trend_variance(
             "bands": ext_bands,
         }
 
-    slope_series = None
     if show_oscillator:
         slope_series, var_series = rolling_trend_variance(log_price, window)
         result["oscillator"] = {
             "times": dates,
             "slope": _nan_to_none(slope_series),
             "var": _nan_to_none(var_series),
-        }
-
-    if show_accel_fan:
-        if slope_series is not None:
-            slope_for_accel, origin_local = slope_series, origin
-        else:
-            slope_for_accel = _slope_window_for_accel(log_price, origin, window, m_accel)
-            origin_local = len(slope_for_accel) - 1
-
-        _, fitted_slope_of_slope, _ = single_window_trend(slope_for_accel, origin_local, m_accel)
-        d0 = (fitted_slope_of_slope[-1] - fitted_slope_of_slope[0]) / (m_accel - 1)
-        slope_hyp = local_slope + n_accel * d0
-
-        x_win = np.arange(window, dtype=np.float64)
-        fan_log = fitted_log[0] + slope_hyp * x_win
-        result["accel_fan"] = {
-            "price": np.exp(fan_log).tolist(),
-            "direction": "up" if d0 >= 0 else "down",
-            "d0": float(d0),
         }
 
     return result

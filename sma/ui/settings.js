@@ -37,9 +37,6 @@ const DEFAULT_COLOR_PROFILE = {
   next_origin_marker: '#58a6ff',
   trend_ruler_line: '#1f77b4',
   trend_ruler_origin: '#bc8cff',
-  trend_ruler_accel_up: '#2ca02c',
-  trend_ruler_accel_down: '#d62728',
-  trend_ruler_accel_line: '#7f7f7f',
   ma_palette: ['#f0883e', '#a5d6ff', '#d2a8ff', '#7ee787', '#ffa198', '#79c0ff'],
   zigzag_tool_palette: ['#d29922', '#f0883e', '#a5d6ff', '#7ee787', '#ffa198', '#d2a8ff'],
   forecast_zigzag: '#d29922',
@@ -54,11 +51,14 @@ const DEFAULT_COLOR_PROFILE = {
   simplex_origin_lines: '#64b4ff',
   simplex_mean_band: '#ffd600',
   range_forecast_line: '#ffd600',
+  risk_calc_entry: '#58a6ff',
+  risk_calc_stop: '#f85149',
+  risk_calc_profit: '#3fb950',
   spectrogram_colorscale: 'Viridis',
-  spectrogram_cutoff_line: '#ff5050',
   variance_slope_up: '#2ca02c',
   variance_slope_down: '#d62728',
   variance_var: '#9467bd',
+  variance_slopevar: '#e8a33d',
   volume_up: '#3fb950',
   volume_down: '#f85149',
 };
@@ -83,9 +83,6 @@ const COLOR_ROLES = [
   { group: 'Основной график', tool: 'Ценовой уровень', key: 'price_level', label: 'Ценовой уровень', type: 'color' },
   { group: 'Основной график', tool: 'Линейка тренда', key: 'trend_ruler_line', label: 'Линия тренд-линейки', type: 'color' },
   { group: 'Основной график', tool: 'Линейка тренда', key: 'trend_ruler_origin', label: 'Точка отсчёта тренд-линейки', type: 'color' },
-  { group: 'Основной график', tool: 'Линейка тренда', key: 'trend_ruler_accel_up', label: 'Веер ускорения: рост', type: 'color' },
-  { group: 'Основной график', tool: 'Линейка тренда', key: 'trend_ruler_accel_down', label: 'Веер ускорения: падение', type: 'color' },
-  { group: 'Основной график', tool: 'Линейка тренда', key: 'trend_ruler_accel_line', label: 'Веер ускорения: линия', type: 'color' },
   { group: 'Основной график', tool: 'Скользящие средние', key: 'ma_palette', label: 'Палитра MA', type: 'palette' },
   { group: 'Основной график', tool: 'Zig-Zag', key: 'zigzag_tool_palette', label: 'Палитра Zig-Zag', type: 'palette' },
   { group: 'Основной график', tool: 'band_lambda', key: 'forecast_zigzag', label: 'Зигзаг прогноза', type: 'color' },
@@ -100,16 +97,19 @@ const COLOR_ROLES = [
   { group: 'Основной график', tool: 'Риск-корридор', key: 'risk_corridor_close', label: 'Полоса Close', type: 'color' },
   { group: 'Основной график', tool: 'Риск-корридор', key: 'risk_corridor_high', label: 'Риск-огибающая High', type: 'color' },
   { group: 'Основной график', tool: 'Риск-корридор', key: 'risk_corridor_low', label: 'Риск-огибающая Low', type: 'color' },
+  { group: 'Основной график', tool: 'Калькулятор риска', key: 'risk_calc_entry', label: 'Линия входа', type: 'color' },
+  { group: 'Основной график', tool: 'Калькулятор риска', key: 'risk_calc_stop', label: 'Линия стопа', type: 'color' },
+  { group: 'Основной график', tool: 'Калькулятор риска', key: 'risk_calc_profit', label: 'Линия тейк-профита', type: 'color' },
   { group: 'Основной график', tool: 'Свечи', key: 'candle_up', label: 'Свеча: рост', type: 'color' },
   { group: 'Основной график', tool: 'Свечи', key: 'candle_down', label: 'Свеча: падение', type: 'color' },
   {
     group: 'Осциллятор', tool: 'Спектрограмма Δratio', key: 'spectrogram_colorscale', label: 'Цветовая схема', type: 'select',
     options: ['Viridis', 'Plasma', 'Turbo', 'Cividis', 'Inferno', 'Magma', 'Blues', 'Greens', 'YlOrRd', 'Greys'],
   },
-  { group: 'Осциллятор', tool: 'Спектрограмма Δratio', key: 'spectrogram_cutoff_line', label: 'Линии среза', type: 'color' },
-  { group: 'Осциллятор', tool: 'Осциллятор дисперсии', key: 'variance_slope_up', label: 'Наклон — рост', type: 'color' },
-  { group: 'Осциллятор', tool: 'Осциллятор дисперсии', key: 'variance_slope_down', label: 'Наклон — падение', type: 'color' },
-  { group: 'Осциллятор', tool: 'Осциллятор дисперсии', key: 'variance_var', label: 'Величина', type: 'color' },
+  { group: 'Осциллятор', tool: 'Осциллятор тренда', key: 'variance_slope_up', label: 'Направление тренда — рост', type: 'color' },
+  { group: 'Осциллятор', tool: 'Осциллятор тренда', key: 'variance_slope_down', label: 'Направление тренда — падение', type: 'color' },
+  { group: 'Осциллятор', tool: 'Осциллятор тренда', key: 'variance_var', label: 'Дисперсия внутри окна тренда', type: 'color' },
+  { group: 'Осциллятор', tool: 'Осциллятор тренда', key: 'variance_slopevar', label: 'Дисперсия направления тренда', type: 'color' },
   { group: 'Осциллятор', tool: 'Объём', key: 'volume_up', label: 'Рост', type: 'color' },
   { group: 'Осциллятор', tool: 'Объём', key: 'volume_down', label: 'Падение', type: 'color' },
 ];
@@ -185,6 +185,19 @@ function readColorProfileForm() {
   return profile;
 }
 
+// Merges GET /settings' tool_display (if any) over S.toolDisplayDefaults'
+// hardcoded fallback, ONE LEVEL DEEP per tool — same forward-compat
+// reasoning as DEFAULT_COLOR_PROFILE's flat merge, just nested because each
+// tool owns its own sub-object (see sma/core/db.py:_parse_tool_display,
+// the server-side twin of this).
+function mergeToolDisplay(stored) {
+  const merged = {};
+  for (const [tool, defaults] of Object.entries(S.toolDisplayDefaults)) {
+    merged[tool] = { ...defaults, ...(stored?.[tool] || {}) };
+  }
+  return merged;
+}
+
 export async function loadAppSettings() {
   try {
     const s = await api('GET', '/settings');
@@ -192,6 +205,7 @@ export async function loadAppSettings() {
     document.getElementById('settings-calibration-workers').value = s.calibration_workers;
     document.getElementById('settings-chart-window-bars').value = s.chart_window_bars;
     S.chartWindowBars = s.chart_window_bars;
+    S.toolDisplayDefaults = mergeToolDisplay(s.tool_display);
 
     const profile = { ...DEFAULT_COLOR_PROFILE, ...(s.color_profile || {}) };
     S.colorProfile = profile;
@@ -217,6 +231,7 @@ export async function saveAppSettings() {
       calibration_workers: calibWorkers,
       chart_window_bars: chartWindowBars,
       color_profile: S.colorProfile, // current in-memory profile — the color form lives in its OWN accordion, untouched by this save
+      tool_display: S.toolDisplayDefaults, // ditto — owned by each tool's own panel, not this form
     });
     S.chartWindowBars = chartWindowBars; // takes effect from the next ticker/interval load or pan-back fetch, not retroactively on already-loaded candles
     setIdle('Настройки сохранены');
@@ -243,6 +258,7 @@ export async function saveColorProfile() {
       calibration_workers: +document.getElementById('settings-calibration-workers').value,
       chart_window_bars: +document.getElementById('settings-chart-window-bars').value,
       color_profile: colorProfile,
+      tool_display: S.toolDisplayDefaults,
     });
     S.colorProfile = { ...DEFAULT_COLOR_PROFILE, ...(saved.color_profile || colorProfile) };
     renderChart({ preserveRange: true }); // colors changed — redraw everything that reads S.colorProfile
@@ -252,4 +268,27 @@ export async function saveColorProfile() {
   } finally {
     btn.disabled = false;
   }
+}
+
+// Called by trend_ruler.js/simplex_ensemble.js/regime_mixture_potential.js
+// whenever one of THEIR global display toggles changes (project request
+// 2026-10-04) — same "resend the full /settings body" requirement as
+// saveColorProfile above (moex_pool_workers/calibration_workers/
+// chart_window_bars have no leave-alone convenience), but silent/no-status-
+// message and debounced HERE (shared single timer) so a tool doesn't need
+// its own — e.g. dragging trend_ruler's opacity slider fires this on every
+// tick without a request-per-tick.
+let _toolDisplaySaveTimer = null;
+
+export function saveToolDisplayDefaults() {
+  clearTimeout(_toolDisplaySaveTimer);
+  _toolDisplaySaveTimer = setTimeout(() => {
+    api('POST', '/settings', {
+      moex_pool_workers: +document.getElementById('settings-moex-workers').value,
+      calibration_workers: +document.getElementById('settings-calibration-workers').value,
+      chart_window_bars: +document.getElementById('settings-chart-window-bars').value,
+      color_profile: S.colorProfile,
+      tool_display: S.toolDisplayDefaults,
+    }).catch(() => {});
+  }, 500);
 }
